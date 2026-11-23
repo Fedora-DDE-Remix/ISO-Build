@@ -4,6 +4,7 @@
 lang en_US.UTF-8
 keyboard us
 timezone Etc/UTC --utc
+network --bootproto=dhcp --device=link --activate
 rootpw --lock
 selinux --disabled
 firewall --enabled --service=mdns
@@ -101,9 +102,18 @@ shopt -s nullglob
 rpms=(/work/rpms/*.rpm)
 (( ${#rpms[@]} > 0 ))
 install -m 0600 "${rpms[@]}" /mnt/sysimage/root/compose-rpms/
+install -d -m 0700 /mnt/sysimage/root/compose-comps
+comps_rpms=(/work/comps-bootstrap/*.rpm)
+(( ${#comps_rpms[@]} == 1 ))
+install -m 0600 "${comps_rpms[@]}" /work/comps-bootstrap/pubkey.gpg \
+    /work/comps-bootstrap/SHA256SUMS /mnt/sysimage/root/compose-comps/
 %end
 
-%post --erroronfail --interpreter=/usr/bin/bash --log=/var/log/fedora-dde-remix-compose.log
+%post --nochroot --erroronfail --interpreter=/usr/bin/bash --log=/output/logs/image-config.log
+# Keep DNF/PAM errors outside the image as well, even if Anaconda aborts and
+# unmounts the image before the final manifest-saving script can run.
+set -euo pipefail
+chroot /mnt/sysimage /usr/bin/bash -s <<'DDE_IMAGE_POST'
 set -euo pipefail
 umask 022
 restore_resolver() {
@@ -122,7 +132,7 @@ cleanup() {
     set +e
     restore_resolver || status=1
     rm -f /root/.fedora-dde-iso-build /root/check-pam.py /root/configure-live.sh
-    rm -rf /root/compose-rpms
+    rm -rf /root/compose-rpms /root/compose-comps
     # Leave the %post log intact on both successful and failed installs.
     exit "$status"
 }
@@ -130,15 +140,20 @@ trap cleanup EXIT
 
 # The comps RPM enables its local file:// repository. It must be installed in
 # an earlier transaction than the group, so that the next DNF process can load
-# the new group metadata. Keep the maintainer's prescribed order.
+# the new group metadata. Keep the maintainer's prescribed order, using the
+# exact comps RPM already downloaded and verified by the builder.
 dnf -y copr enable mozixun/Fedora-DDE-Remix
-dnf -y install dde-desktop-comps
+(cd /root/compose-comps && sha256sum --check SHA256SUMS)
+rpmkeys --import /root/compose-comps/pubkey.gpg
+rpmkeys --checksig --verbose /root/compose-comps/*.rpm
+dnf -y --setopt=localpkg_gpgcheck=1 install /root/compose-comps/*.rpm
 dnf -y --exclude=systemd-homed group install dde-desktop
 dnf -y --exclude=systemd-homed install /root/compose-rpms/*.rpm
 
 /root/configure-live.sh image
 install -m 0600 /dev/null /root/.fedora-dde-iso-build
 python3 /root/check-pam.py
+DDE_IMAGE_POST
 %end
 
 %post --nochroot --erroronfail --interpreter=/usr/bin/bash --log=/output/logs/save-manifest.log
@@ -147,9 +162,10 @@ mountpoint -q /mnt/sysimage
 install -m 0644 /mnt/sysimage/usr/share/fedora-dde-remix/rpm-manifest.txt /output/rpm-manifest.txt
 cmp /work/build-info.json /mnt/sysimage/usr/share/fedora-dde-remix/build-info.json
 install -m 0644 /mnt/sysimage/usr/share/fedora-dde-remix/build-info.json /output/build-info.json
-install -m 0644 /mnt/sysimage/var/log/fedora-dde-remix-compose.log /output/logs/image-config.log
+install -m 0644 /output/logs/image-config.log /mnt/sysimage/var/log/fedora-dde-remix-compose.log
 test ! -e /mnt/sysimage/root/.fedora-dde-iso-build
 test ! -e /mnt/sysimage/root/compose-rpms
+test ! -e /mnt/sysimage/root/compose-comps
 test ! -e /mnt/sysimage/root/compose-resolv.conf
 test ! -L /mnt/sysimage/root/compose-resolv.conf
 test ! -e /mnt/sysimage/root/compose-resolv.conf.absent

@@ -15,20 +15,20 @@ source /workspace/config/build.env
 [[ -d /installer/.git && -d /workspace/.git ]]
 mkdir -p /work/rpms /output/logs /output/rpms
 
-dnf -y install dnf5-plugins
+dnf -y install dnf5-plugins /usr/bin/curl python3
 dnf -y copr enable mozixun/Fedora-DDE-Remix
 
-# The maintainer publishes the group through this RPM's local repository.
-# This also verifies that the normal user-facing COPR repository is ready.
-if ! dnf -y --refresh install dde-desktop-comps; then
-    echo 'Cannot install dde-desktop-comps from the enabled COPR repository.' >&2
-    echo 'Check the DNF error above and that the maintainer has published the completed build.' >&2
-    exit 3
-fi
+# Prefer the normal repository. When its metadata has not caught up, consume
+# only the signed, completed comps build; keep all desktop packages on the
+# normal repository. Reuse these exact verified RPM bytes inside the image.
+bash /workspace/scripts/prepare-comps.sh
+install -m644 /work/comps-input.json /output/comps-input.json
+cp -a /work/comps-bootstrap/*.rpm /output/rpms/
+install -m644 /work/comps-bootstrap/pubkey.gpg /output/rpms/comps-pubkey.gpg
 dnf group info dde-desktop | tee /output/dde-desktop-group.txt
 rpm -q dde-desktop-comps | tee /output/comps-version.txt
 
-dnf -y install git curl rpm-build cmake gcc-c++ ninja-build \
+dnf -y install git rpm-build cmake gcc-c++ ninja-build \
     lorax-lmc-novirt systemd-rpm-macros tar gzip python3
 
 actual_ref=$(git -c safe.directory=/installer -C /installer rev-parse HEAD)
@@ -48,6 +48,7 @@ data = {
     'selinux': 'disabled',
     'copr': 'mozixun/Fedora-DDE-Remix',
     'desktop_group': 'dde-desktop',
+    'comps': json.loads(Path('/work/comps-input.json').read_text()),
     'live_login': 'manual',
     'built_at_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
 }

@@ -31,6 +31,7 @@ configure_image() {
 import json
 from pathlib import Path
 import re
+import subprocess
 p = Path('/usr/share/fedora-dde-remix/build-info.json')
 assert not p.is_symlink() and p.is_file(), 'Missing build provenance JSON'
 data = json.loads(p.read_text())
@@ -40,6 +41,12 @@ expected = {'iso_repository': 'Fedora-DDE-Remix/ISO-Build',
             'copr': 'mozixun/Fedora-DDE-Remix', 'desktop_group': 'dde-desktop', 'live_login': 'manual'}
 assert isinstance(data, dict) and all(data.get(k) == v for k, v in expected.items()), 'Unexpected build provenance'
 assert all(re.fullmatch(r'[0-9a-f]{40}', data.get(k, '')) for k in ('iso_commit', 'installer_commit')), 'Invalid source commit'
+comps = data.get('comps', {})
+installed_comps = subprocess.check_output(
+    ['rpm', '-q', '--qf', '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}', 'dde-desktop-comps'],
+    text=True)
+assert comps.get('nevra') == installed_comps, 'Comps input differs from the installed RPM'
+assert re.fullmatch(r'[0-9a-f]{64}', comps.get('sha256', '')), 'Missing comps RPM digest'
 PY
     [[ -s /etc/pam.d/system-login ]] || die 'The Fedora system-login compatibility stack is missing.'
     [[ -x /usr/libexec/fedora-dde-live ]] || die 'The packaged Live helper is missing.'

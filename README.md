@@ -20,9 +20,14 @@ sudo dnf group install dde-desktop
 
 DNF 5 的 `group install` 对应桌面组安装操作。comps RPM 先安装本地组元数据，
 下一次 DNF 运行才能解析 `dde-desktop` 组。配方保留这个顺序，不维护第二份桌面包清单。
-如果 comps 只完成了 COPR 构建、尚未发布到普通软件源，构建会在预检阶段说明失败，
-由项目维护者发布后再运行。本工作流不写入 COPR，也不构建或修改
-`Deepin-Desktop-Environment` 仓库。
+预检优先执行普通仓库的 `dnf install dde-desktop-comps`。如果仓库索引暂时找不到
+这个包，本版只对 comps 使用已成功的 COPR 构建 **11377888**，版本固定为
+`6.2.1-1.fc45.noarch`。下载后校验项目公钥、RPM 签名和版本，记录实际 SHA-256；
+镜像内先安装同一份已验证的 comps RPM，再单独安装桌面组。桌面其他依赖继续使用
+原 COPR，不启用整套 devel 仓库。
+
+产物的 `comps-input.json` 和 `build-info.json` 记录实际选择的来源、版本及校验值。
+本工作流不写入 COPR，也不构建或修改 `Deepin-Desktop-Environment` 仓库。
 
 ## Live 登录与 PAM
 

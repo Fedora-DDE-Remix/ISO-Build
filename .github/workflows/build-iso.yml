@@ -78,6 +78,7 @@ jobs:
             artifacts/*.iso
             artifacts/*CHECKSUM*
             artifacts/build-info.json
+            artifacts/comps-input.json
             artifacts/container-image.json
             artifacts/rpm-manifest.txt
           compression-level: 0

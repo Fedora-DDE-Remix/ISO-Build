@@ -29,7 +29,7 @@ grep -qx fedora-dde-remix-config <<< "$names" || die 'The ISO configuration RPM 
 
 # This Fedora metapackage supplies Anaconda's no-virt runtime and Lorax's
 # xorriso, squashfs, loop/filesystem and Kickstart dependencies.
-dnf -y install lorax-lmc-novirt dnf5-plugins
+dnf -y install lorax-lmc-novirt pykickstart dnf5-plugins
 for command in livemedia-creator ksflatten ksvalidator xorriso unsquashfs lsinitrd; do
     command -v "$command" >/dev/null || die "Required command not found: $command"
 done
