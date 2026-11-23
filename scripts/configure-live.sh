@@ -96,6 +96,8 @@ PY
     # A new machine identity is generated in the writable overlay at boot.
     rm -f /etc/machine-id /var/lib/dbus/machine-id
     install -m 0444 /dev/null /etc/machine-id
+    # A compose chroot has not run the boot-time tmpfiles setup yet.
+    install -d -m 0755 /var/lib/dbus
     ln -s /etc/machine-id /var/lib/dbus/machine-id
     rm -f /var/lib/systemd/random-seed /var/lib/systemd/credential.secret /etc/ssh/ssh_host_*
     dnf -y clean all
