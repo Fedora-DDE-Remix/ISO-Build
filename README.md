@@ -63,8 +63,10 @@ Anaconda 采用目录安装到新创建的临时文件系统镜像，配方不�
 保留 14 天；构建失败会保留已生成的日志及 RPM。实际产物以 Actions 状态为准，
 提交配方或生成 RPM 不等于 ISO 已经构建成功。
 
-`config/build.env` 固定安装器提交。工作流从该提交构建并测试 RPM，再安装到
-ISO 中；不依赖 GitHub 上临时过期的旧 artifact。Fedora 与 COPR 软件包仍取自
+`config/build.env` 固定安装器提交。工作流优先复用该提交已经通过完整构建和测试的
+安装器 CI artifact，同时核对源提交和固定 ZIP SHA-256；这项只读下载不把 GitHub
+令牌传入构建容器。若 artifact 已过期、不可访问或不适用于该提交，则从固定源码
+重新构建并测试 RPM。Fedora 与 COPR 软件包仍取自
 构建时启用的软件源，产物中的 RPM manifest 用来记录本次实际选择。
 
 本地复现也应使用可丢弃的构建 VM。将本仓库挂载到 `/workspace:ro`，将固定

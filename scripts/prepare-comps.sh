@@ -27,6 +27,7 @@ key_url=https://download.copr.fedorainfracloud.org/results/mozixun/Fedora-DDE-Re
 key_sha256=eb44eeabc2a5546db7b72d9f5adc6d9c17f7a4b7456e579e3dc0d964e2455200
 key_fingerprint=1E6DCAB9CD7C35C002E28E9737CFB2A4FF3592C8
 fallback_nevra=dde-desktop-comps-6.2.1-1.fc45.noarch
+fallback_sha256=873ffa2b6d4d346bfe938eee6c0d3aaf55e09269d75e790179f419699dfffe4e
 fallback_url=https://download.copr.fedorainfracloud.org/results/mozixun/Fedora-DDE-Remix/fedora-45-x86_64-devel/11377888-dde-desktop-comps/dde-desktop-comps-6.2.1-1.fc45.noarch.rpm
 nevra_format='%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n'
 
@@ -67,6 +68,9 @@ rpms=("$bootstrap"/*.rpm)
 (( ${#rpms[@]} == 1 )) || die 'Expected exactly one comps RPM.'
 rpm_file=${rpms[0]}
 [[ -s $rpm_file && ! -L $rpm_file ]] || die 'The downloaded RPM is not a regular nonempty file.'
+if [[ $mode == copr-build-fallback ]]; then
+    printf '%s  %s\n' "$fallback_sha256" "$rpm_file" | sha256sum --check --strict
+fi
 
 download_https "$key_url" "$bootstrap/pubkey.gpg"
 printf '%s  %s\n' "$key_sha256" "$bootstrap/pubkey.gpg" | sha256sum --check --strict

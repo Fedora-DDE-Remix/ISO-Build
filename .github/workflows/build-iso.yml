@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: iso-${{ github.ref }}
@@ -57,6 +58,41 @@ jobs:
           docker image inspect registry.fedoraproject.org/fedora:45 \
             --format '{{json .RepoDigests}}' > artifacts/container-image.json
 
+      - name: Reuse the verified installer CI artifact when available
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p .build/installer-rpms
+          source config/build.env
+          if [[ $INSTALLER_REF != cee14c9f2f0afdad066a08a401894a89a6cf9957 ]]; then
+            echo 'No verified artifact is pinned for this installer revision; building from source.'
+            exit 0
+          fi
+          if ! artifact_source_ref=$(gh api repos/Fedora-DDE-Remix/fedora-dde-installer/actions/runs/45097911923 --jq .head_sha); then
+            echo 'Installer CI metadata is unavailable; building from source.'
+            exit 0
+          fi
+          if [[ $artifact_source_ref != "$INSTALLER_REF" ]]; then
+            echo 'Installer CI revision differs; building from source.'
+            exit 0
+          fi
+          if ! gh api repos/Fedora-DDE-Remix/fedora-dde-installer/actions/artifacts/14784695594/zip > .build/installer-input.zip; then
+            echo 'Installer artifact is unavailable or expired; building from source.'
+            exit 0
+          fi
+          echo '4aff8b5fde96249882e09e2cb032f2a5ee4eeca39bd178f62531ec48d3b2a828  .build/installer-input.zip' | sha256sum --check --strict
+          unzip -q .build/installer-input.zip -d .build/installer-rpms
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          data = {'schema': 1, 'commit': 'cee14c9f2f0afdad066a08a401894a89a6cf9957',
+                  'run_id': 45097911923, 'artifact_id': 14784695594,
+                  'sha256': '4aff8b5fde96249882e09e2cb032f2a5ee4eeca39bd178f62531ec48d3b2a828'}
+          Path('.build/installer-rpms/verified-input.json').write_text(json.dumps(data, indent=2) + '\n')
+          PY
+
       - name: Build RPMs and compose the Live ISO
         shell: bash
         run: |
@@ -65,10 +101,23 @@ jobs:
             --env FEDORA_DDE_ISO_BUILD=1 \
             --volume "$GITHUB_WORKSPACE:/workspace:ro" \
             --volume "$GITHUB_WORKSPACE/.build/installer:/installer:ro" \
+            --volume "$GITHUB_WORKSPACE/.build/installer-rpms:/installer-rpms:ro" \
             --volume "$RUNNER_TEMP/fedora-dde-iso-work:/work" \
             --volume "$GITHUB_WORKSPACE/artifacts:/output" \
             registry.fedoraproject.org/fedora:45 \
             bash -c 'set -o pipefail; bash /workspace/scripts/build.sh 2>&1 | tee /output/logs/build.log'
+
+      - name: Preserve diagnostics and make build outputs readable
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/logs
+          sudo dmesg --ctime | grep -Ei 'out of memory|oom|killed process' > artifacts/logs/host-oom.log || true
+          free -h > artifacts/logs/host-memory.txt
+          df -h "$RUNNER_TEMP" "$GITHUB_WORKSPACE" > artifacts/logs/host-filesystems.txt
+          sudo chown -R --no-dereference "$(id -u):$(id -g)" artifacts
+          chmod -R u+rwX artifacts
 
       - name: Upload ISO and checksums
         uses: actions/upload-artifact@v4

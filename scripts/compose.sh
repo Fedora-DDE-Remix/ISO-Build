@@ -31,7 +31,7 @@ grep -qx fedora-dde-remix-config <<< "$names" || die 'The ISO configuration RPM 
 # This Fedora metapackage supplies Anaconda's no-virt runtime and Lorax's
 # xorriso, squashfs, loop/filesystem and Kickstart dependencies.
 dnf -y install lorax-lmc-novirt pykickstart dnf5-plugins
-for command in livemedia-creator ksflatten ksvalidator xorriso unsquashfs lsinitrd; do
+for command in livemedia-creator ksflatten ksvalidator xorriso unsquashfs lsinitrd python3 tail; do
     command -v "$command" >/dev/null || die "Required command not found: $command"
 done
 losetup --find >/dev/null || die 'The container cannot allocate a loop device.'
@@ -42,7 +42,9 @@ ksvalidator --version F45 /work/fedora-dde-live-flat.ks
 install -m 0644 /work/fedora-dde-live-flat.ks /output/build.ks
 rpm -q lorax anaconda-core anaconda-tui python3-kickstart > /output/logs/compose-tool-versions.txt
 
-livemedia-creator \
+# Follow the external %post logs while LMC runs. Anaconda deliberately waits
+# after a fatal error; preserve its diagnostics before ending that wait.
+python3 - /output/logs /work/compose-tmp /tmp livemedia-creator \
     --make-iso --no-virt \
     --ks /work/fedora-dde-live-flat.ks \
     --releasever 45 --project 'Fedora DDE Remix' \
@@ -51,7 +53,167 @@ livemedia-creator \
     --extra-boot-args 'selinux=0' \
     --iso-only --iso-name Fedora-DDE-Remix-45-x86_64.iso \
     --tmp /work/compose-tmp --resultdir /work/compose-result \
-    --logfile /output/logs/lmc.log
+    --logfile /output/logs/lmc.log <<'PY'
+from pathlib import Path
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import traceback
+
+log_dir, lmc_tmp, anaconda_tmp = map(Path, sys.argv[1:4])
+command = sys.argv[4:]
+post_logs = [log_dir / name for name in
+             ('stage-files.log', 'image-config.log', 'save-manifest.log')]
+for path in post_logs:
+    if path.is_symlink():
+        raise RuntimeError(f'Refusing a symlinked compose log: {path}')
+    path.touch()
+    path.chmod(0o644)
+
+requested_signal = None
+def request_stop(signum, _frame):
+    global requested_signal
+    requested_signal = signum
+
+for signum in (signal.SIGINT, signal.SIGTERM):
+    signal.signal(signum, request_stop)
+
+def mirror_logs():
+    # These are the Fedora 45 Anaconda runtime paths and Lorax's copy location.
+    # Inspect only bounded-depth paths under --tmp, never walk a mounted root.
+    sources = ((anaconda_tmp, 'runtime', ('*.log', 'anaconda-tb-*')),
+               (log_dir / 'anaconda', 'lmc-copy', ('*',)),
+               (lmc_tmp, 'lmc-tmp', ('*.log', 'anaconda-tb-*',
+                   '*/anaconda*.log', '*/program.log', '*/dbus.log',
+                   '*/packaging.log', '*/storage.log', '*/logs/*.log')))
+    copied = 0
+    for base, label, patterns in sources:
+        if not base.is_dir():
+            continue
+        for pattern in patterns:
+            for source in base.glob(pattern):
+                try:
+                    if source.is_symlink() or not source.is_file():
+                        continue
+                    if not source.resolve().is_relative_to(base.resolve()):
+                        continue
+                    target = log_dir / 'anaconda-snapshot' / label / source.relative_to(base)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(source, target)
+                    target.chmod(0o644)
+                    copied += 1
+                except OSError as error:
+                    print(f'compose: Cannot preserve {source}: {error}', flush=True)
+    if copied:
+        print(f'compose: Preserved {copied} Anaconda log files in '
+              f'{log_dir / "anaconda-snapshot"}.', flush=True)
+
+def group_exists(pgid):
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+def stop_group(process):
+    if process is None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    deadline = time.monotonic() + 10
+    while group_exists(process.pid) and time.monotonic() < deadline:
+        process.poll()
+        time.sleep(0.2)
+    if group_exists(process.pid):
+        print('compose: Killing the remaining LMC process group after 10 seconds.', flush=True)
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    try:
+        process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        print('compose: LMC did not exit after SIGKILL; container teardown is required.', flush=True)
+
+def show_failure_logs():
+    paths = post_logs + [log_dir / 'anaconda-snapshot' / 'runtime' / name
+                        for name in ('anaconda.log', 'program.log', 'dbus.log')]
+    for path in paths:
+        try:
+            if not path.is_file() or path.stat().st_size == 0:
+                continue
+            with path.open('rb') as stream:
+                stream.seek(max(0, path.stat().st_size - 32768))
+                lines = stream.read().decode('utf-8', errors='replace').splitlines()[-80:]
+            print(f'\n=== Final diagnostics: {path} (up to 80 lines) ===', flush=True)
+            print('\n'.join(lines), flush=True)
+        except OSError as error:
+            print(f'compose: Cannot read {path}: {error}', flush=True)
+
+process = follower = None
+status = 1
+position = 0
+identity = None
+previous = b''
+try:
+    follower = subprocess.Popen(['tail', '-n', '+1', '-F', '-s', '0.2', '--',
+                                 *map(str, post_logs)], start_new_session=True)
+    process = subprocess.Popen(command, start_new_session=True)
+    while True:
+        terminal_error = False
+        try:
+            path = log_dir / 'lmc.log'
+            info = path.stat()
+            current_identity = (info.st_dev, info.st_ino)
+            if current_identity != identity or info.st_size < position:
+                identity, position, previous = current_identity, 0, b''
+            with path.open('rb') as stream:
+                stream.seek(position)
+                content = previous + stream.read()
+                position = stream.tell()
+            terminal_error = b'the installer will now terminate.' in content.lower()
+            previous = content[-256:]
+        except FileNotFoundError:
+            pass
+        if terminal_error:
+            print('compose: Anaconda reported a terminal error. Preserving diagnostics '
+                  'before ending its termination wait.', flush=True)
+            status = 1
+            break
+        if requested_signal is not None:
+            print(f'compose: Received signal {requested_signal}; preserving diagnostics.', flush=True)
+            status = 128 + requested_signal
+            break
+        returncode = process.poll()
+        if returncode is not None:
+            status = returncode if returncode >= 0 else 128 - returncode
+            break
+        time.sleep(0.2)
+except Exception:
+    traceback.print_exc()
+finally:
+    # Capture before signaling: Anaconda cleanup may remove its runtime logs.
+    mirror_logs()
+    stop_group(process)
+    mirror_logs()
+    # Give tail one final polling interval to forward the last %post output.
+    time.sleep(0.3)
+    if follower is not None:
+        follower.terminate()
+        try:
+            follower.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            follower.kill()
+            follower.wait(timeout=2)
+    if status:
+        show_failure_logs()
+sys.exit(status)
+PY
 
 iso=/work/compose-result/Fedora-DDE-Remix-45-x86_64.iso
 [[ -s $iso ]] || die 'LMC did not produce the expected ISO.'
