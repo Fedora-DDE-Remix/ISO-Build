@@ -16,6 +16,7 @@ for directory in /workspace /work /output; do
 done
 [[ -f /workspace/kickstarts/fedora-dde-live.ks ]] || die 'Kickstart is missing.'
 [[ -f /workspace/scripts/check-pam.py ]] || die 'PAM smoke check is missing.'
+[[ -f /workspace/scripts/check-comps.py ]] || die 'Desktop group completeness check is missing.'
 [[ -s /work/build-info.json && ! -L /work/build-info.json ]] || die 'The build provenance JSON is missing.'
 [[ ! -e /work/compose-result ]] || die '/work/compose-result already exists; use a fresh compose workspace.'
 [[ ! -e /output/Fedora-DDE-Remix-45-x86_64.iso ]] || die 'The output ISO already exists.'

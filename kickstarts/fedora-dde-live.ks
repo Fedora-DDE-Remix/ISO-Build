@@ -97,6 +97,7 @@ install -d -m 0755 /mnt/sysimage/usr/share/fedora-dde-remix
 install -m 0644 /work/build-info.json /mnt/sysimage/usr/share/fedora-dde-remix/build-info.json
 install -m 0700 /workspace/scripts/configure-live.sh /mnt/sysimage/root/configure-live.sh
 install -m 0700 /workspace/scripts/check-pam.py /mnt/sysimage/root/check-pam.py
+install -m 0700 /workspace/scripts/check-comps.py /mnt/sysimage/root/check-comps.py
 install -d -m 0700 /mnt/sysimage/root/compose-rpms
 shopt -s nullglob
 rpms=(/work/rpms/*.rpm)
@@ -131,7 +132,7 @@ cleanup() {
     trap - EXIT
     set +e
     restore_resolver || status=1
-    rm -f /root/.fedora-dde-iso-build /root/check-pam.py /root/configure-live.sh
+    rm -f /root/.fedora-dde-iso-build /root/check-pam.py /root/check-comps.py /root/configure-live.sh
     rm -rf /root/compose-rpms /root/compose-comps
     # Leave the %post log intact on both successful and failed installs.
     exit "$status"
@@ -149,6 +150,7 @@ rpmkeys --checksig --verbose /root/compose-comps/*.rpm
 dnf -y --setopt=localpkg_gpgcheck=1 install /root/compose-comps/*.rpm
 dnf -y --exclude=systemd-homed group install dde-desktop
 dnf -y --exclude=systemd-homed install /root/compose-rpms/*.rpm
+python3 /root/check-comps.py
 
 /root/configure-live.sh image
 install -m 0600 /dev/null /root/.fedora-dde-iso-build

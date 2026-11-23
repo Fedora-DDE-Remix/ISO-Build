@@ -27,7 +27,7 @@ key_url=https://download.copr.fedorainfracloud.org/results/mozixun/Fedora-DDE-Re
 key_sha256=eb44eeabc2a5546db7b72d9f5adc6d9c17f7a4b7456e579e3dc0d964e2455200
 key_fingerprint=1E6DCAB9CD7C35C002E28E9737CFB2A4FF3592C8
 fallback_nevra=dde-desktop-comps-6.2.1-1.fc45.noarch
-fallback_url=https://download.copr.fedorainfracloud.org/results/mozixun/Fedora-DDE-Remix/fedora-45-x86_64/11377888-dde-desktop-comps/dde-desktop-comps-6.2.1-1.fc45.noarch.rpm
+fallback_url=https://download.copr.fedorainfracloud.org/results/mozixun/Fedora-DDE-Remix/fedora-45-x86_64-devel/11377888-dde-desktop-comps/dde-desktop-comps-6.2.1-1.fc45.noarch.rpm
 nevra_format='%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n'
 
 download_https() {
@@ -54,7 +54,12 @@ else
     epoch=0
     source_url=$fallback_url
     printf 'Using the signed RPM from completed COPR build 11377888.\n'
-    download_https "$source_url" "$bootstrap/$nevra.rpm"
+    # Match copr-cli download-build: in manual-publication projects the
+    # signed, completed build is served through the -devel distribution.
+    # This downloads one RPM only; it never enables a developer repository.
+    if ! download_https "$source_url" "$bootstrap/$nevra.rpm"; then
+        die 'The signed comps RPM is not downloadable; the COPR maintainer must publish or repair the completed build before ISO composition can continue.'
+    fi
 fi
 
 shopt -s nullglob
@@ -118,7 +123,7 @@ data = {
     'sha256': digest,
     'rpm_filename': filename,
     'source_url': source_url or None,
-    'copr_build_id': 11377888 if mode == 'copr-build-fallback' else None,
+    'requested_copr_build_id': 11377888 if mode == 'copr-build-fallback' else None,
     'key_url': key_url,
     'key_fingerprint': fingerprint,
     'key_sha256': key_digest,

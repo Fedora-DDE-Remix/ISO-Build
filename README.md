@@ -24,9 +24,12 @@ DNF 5 的 `group install` 对应桌面组安装操作。comps RPM 先安装本�
 这个包，本版只对 comps 使用已成功的 COPR 构建 **11377888**，版本固定为
 `6.2.1-1.fc45.noarch`。下载后校验项目公钥、RPM 签名和版本，记录实际 SHA-256；
 镜像内先安装同一份已验证的 comps RPM，再单独安装桌面组。桌面其他依赖继续使用
-原 COPR，不启用整套 devel 仓库。
+原 COPR。回退下载遵循 `copr-cli download-build` 对手动发布项目的处理方式，
+从 `-devel` 分发获取这一个精确 RPM；不启用或写入 devel 仓库配置。
 
 产物的 `comps-input.json` 和 `build-info.json` 记录实际选择的来源、版本及校验值。
+安装后直接读取该 RPM 的 comps 元数据，逐一检查 `dde-desktop` 的 mandatory 包已安装；
+DNF 即使跳过缺失的组包并返回成功，也不能绕过这项检查。
 本工作流不写入 COPR，也不构建或修改 `Deepin-Desktop-Environment` 仓库。
 
 ## Live 登录与 PAM

@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: iso-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
   compose:
