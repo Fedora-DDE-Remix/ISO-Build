@@ -187,8 +187,14 @@ def command(name, *args, input_data=None):
     except subprocess.TimeoutExpired:
         raise CheckError(f"build command timed out: {name}") from None
     if result.returncode:
-        # Do not echo command output or stdin: chpasswd handles a secret.
-        raise CheckError(f"build command failed: {name} (exit {result.returncode})")
+        message = f"build command failed: {name} (exit {result.returncode})"
+        # Only these fixed account-management calls have no secret input or
+        # password arguments. Never include chpasswd output or any stdin.
+        if input_data is None and name in {"useradd", "userdel", "chage", "faillock"}:
+            diagnostic = result.stderr.decode("utf-8", errors="replace").strip()[:1024]
+            if diagnostic:
+                message += f": {diagnostic!r}"
+        raise CheckError(message)
 
 
 class Pam:
@@ -392,7 +398,9 @@ def main():
         command(
             "useradd", "--no-create-home", "--no-user-group", "--no-log-init",
             "--gid", str(gid), "--home-dir", TEST_HOME, "--shell", "/bin/bash",
-            "--comment", tag, "-K", "CREATE_MAIL_SPOOL=no", "-K", "SUB_UID_COUNT=0",
+            # CREATE_MAIL_SPOOL belongs to /etc/default/useradd, not the
+            # login.defs keys accepted by -K. Cleanup handles any test mailbox.
+            "--comment", tag, "-K", "SUB_UID_COUNT=0",
             "-K", "SUB_GID_COUNT=0", LOGIN,
         )
         require_password_login(pwd.getpwnam(LOGIN))

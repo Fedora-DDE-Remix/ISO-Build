@@ -221,6 +221,7 @@ iso=/work/compose-result/Fedora-DDE-Remix-45-x86_64.iso
 install -m 0644 "$iso" /output/Fedora-DDE-Remix-45-x86_64.iso
 (
     cd /output
-    sha256sum Fedora-DDE-Remix-45-x86_64.iso > CHECKSUM
+    sha256sum Fedora-DDE-Remix-45-x86_64.iso | tee CHECKSUM
 )
+stat --printf='ISO size: %s bytes\n' /output/Fedora-DDE-Remix-45-x86_64.iso
 printf 'Verified ISO: %s\n' /output/Fedora-DDE-Remix-45-x86_64.iso
