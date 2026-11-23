@@ -1,0 +1,14 @@
+[Unit]
+Description=Prepare the Fedora DDE Remix Live session
+ConditionKernelCommandLine=rd.live.image
+After=local-fs.target systemd-sysusers.service
+Before=display-manager.service ddm.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/fedora-dde-live boot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+

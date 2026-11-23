@@ -1,0 +1,120 @@
+name: Build Fedora DDE Live ISO
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '*.md'
+      - LICENSE
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: iso-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  compose:
+    name: Fedora 45 x86_64 Live ISO (SELinux disabled)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Check out ISO recipe
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Read pinned installer revision
+        id: recipe
+        shell: bash
+        run: |
+          set -euo pipefail
+          source config/build.env
+          [[ $INSTALLER_REF =~ ^[0-9a-f]{40}$ ]]
+          echo "installer_ref=$INSTALLER_REF" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the pinned installer
+        uses: actions/checkout@v4
+        with:
+          repository: Fedora-DDE-Remix/fedora-dde-installer
+          ref: ${{ steps.recipe.outputs.installer_ref }}
+          path: .build/installer
+          persist-credentials: false
+
+      - name: Prepare build directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/logs "$RUNNER_TEMP/fedora-dde-iso-work"
+          df -h "$RUNNER_TEMP" "$GITHUB_WORKSPACE"
+          sudo modprobe loop
+          sudo modprobe dm_mod
+          sudo modprobe squashfs
+          sudo losetup --find
+          docker pull registry.fedoraproject.org/fedora:45
+          docker image inspect registry.fedoraproject.org/fedora:45 \
+            --format '{{json .RepoDigests}}' > artifacts/container-image.json
+
+      - name: Build RPMs and compose the Live ISO
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --privileged \
+            --env FEDORA_DDE_ISO_BUILD=1 \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            --volume "$GITHUB_WORKSPACE/.build/installer:/installer:ro" \
+            --volume "$RUNNER_TEMP/fedora-dde-iso-work:/work" \
+            --volume "$GITHUB_WORKSPACE/artifacts:/output" \
+            registry.fedoraproject.org/fedora:45 \
+            bash -c 'set -o pipefail; bash /workspace/scripts/build.sh 2>&1 | tee /output/logs/build.log'
+
+      - name: Upload ISO and checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: Fedora-DDE-Remix-45-x86_64-${{ github.run_number }}
+          path: |
+            artifacts/*.iso
+            artifacts/*CHECKSUM*
+            artifacts/build-info.json
+            artifacts/container-image.json
+            artifacts/rpm-manifest.txt
+          compression-level: 0
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload build logs and RPM inputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ISO-build-logs-and-RPMs-${{ github.run_number }}
+          path: |
+            artifacts/logs/
+            artifacts/rpms/
+            artifacts/*.txt
+            artifacts/*.json
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Write build summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '## Fedora 45 DDE Remix development ISO'
+            echo
+            echo '- Architecture: x86_64'
+            echo '- SELinux: disabled in Live and installed systems for this recipe'
+            echo '- Live login: `liveuser` / `liveuser` (manual login)'
+            echo '- Desktop: maintainer comps RPM, then `dnf group install dde-desktop`'
+            echo '- Installer revision: `${{ steps.recipe.outputs.installer_ref }}`'
+            echo
+            if compgen -G 'artifacts/*.iso' > /dev/null; then
+              echo '### ISO files'
+              ls -lh artifacts/*.iso
+            else
+              echo 'No ISO was produced. Inspect the build logs for the failed stage.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+

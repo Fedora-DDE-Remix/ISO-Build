@@ -1,0 +1,19 @@
+#%PAM-1.0
+# Fedora authentication bridge for the maintainer's unmodified DDM 0.5.0.
+# This file is owned by fedora-dde-remix-config, not by the DDM package.
+auth        substack      password-auth
+auth        include       postlogin
+
+account     required      pam_nologin.so
+account     include       password-auth
+
+password    include       password-auth
+
+session     required      pam_selinux.so close
+session     required      pam_loginuid.so
+session     required      pam_selinux.so open
+session     optional      pam_keyinit.so force revoke
+session     required      pam_namespace.so
+session     include       password-auth
+session     include       postlogin
+

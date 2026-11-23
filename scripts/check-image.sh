@@ -1,0 +1,135 @@
+#!/usr/bin/bash
+# Structural ISO and read-only payload checks. This does not boot the ISO or
+# mount any filesystem and is not a substitute for a VM installation test.
+set -euo pipefail
+umask 022
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export LC_ALL=C
+
+die() { printf 'check-image: %s\n' "$*" >&2; exit 1; }
+[[ $# -eq 3 ]] || die 'Usage: check-image.sh ISO RPM-MANIFEST REPORT-DIRECTORY'
+iso=$(realpath -- "$1")
+manifest=$(realpath -- "$2")
+report_dir=$(realpath -- "$3")
+build_info=$(realpath -- "$(dirname -- "$manifest")/build-info.json")
+[[ -s $iso && -s $manifest && -s $build_info && -d $report_dir ]] || die 'ISO, manifest, build information or report directory is missing.'
+temporary=$(mktemp -d /work/check-image.XXXXXXXX)
+trap 'rm -rf -- "$temporary"' EXIT
+
+xorriso -indev "$iso" -report_el_torito plain -report_system_area plain \
+    > "$report_dir/iso-boot-report.txt" 2>&1
+grep -Eq 'El Torito boot img.*BIOS' "$report_dir/iso-boot-report.txt" || die 'No BIOS El Torito image.'
+grep -Eq 'El Torito boot img.*UEFI' "$report_dir/iso-boot-report.txt" || die 'No UEFI El Torito image.'
+grep -Eq 'System area summary:.*MBR' "$report_dir/iso-boot-report.txt" || die 'No hybrid MBR.'
+grep -Eq 'System area summary:.*GPT' "$report_dir/iso-boot-report.txt" || die 'No hybrid GPT.'
+
+xorriso -osirrox on -indev "$iso" \
+    -extract /boot/grub2/grub.cfg "$temporary/bios.cfg" \
+    -extract /EFI/BOOT/grub.cfg "$temporary/uefi.cfg" \
+    -extract /EFI/BOOT/BOOTX64.EFI "$temporary/BOOTX64.EFI" \
+    -extract /LiveOS/squashfs.img "$temporary/payload.img" \
+    -extract /images/pxeboot/initrd.img "$temporary/initrd.img" \
+    > "$report_dir/iso-extract.log" 2>&1
+
+python3 - "$temporary/bios.cfg" "$temporary/uefi.cfg" <<'PY'
+from pathlib import Path
+import re
+import sys
+for filename in sys.argv[1:]:
+    entries = [line.split() for line in Path(filename).read_text().splitlines()
+               if re.match(r'^\s*linux(?:efi|16)?\s+', line)]
+    assert entries, f'No Linux boot entries in {filename}'
+    for entry in entries:
+        assert 'selinux=0' in entry, f'SELinux is not disabled in {filename}'
+        assert 'rd.live.image' in entry, f'Not a Fedora Live boot entry in {filename}'
+        assert any(arg.startswith('root=live:') for arg in entry), f'Missing Live image root in {filename}'
+PY
+[[ -s $temporary/BOOTX64.EFI ]] || die 'UEFI fallback loader is empty.'
+lsinitrd -m "$temporary/initrd.img" > "$report_dir/initrd-modules.txt"
+grep -Eq '^[[:space:]]*dmsquash-live[[:space:]]*$' "$report_dir/initrd-modules.txt" || die 'The initrd lacks dmsquash-live.'
+
+unsquashfs -s "$temporary/payload.img" > "$report_dir/payload-superblock.txt"
+unsquashfs -l "$temporary/payload.img" > "$report_dir/payload-files.txt"
+grep -Eq '/usr/lib/modules/[^/]+/vmlinuz$' "$report_dir/payload-files.txt" || die 'The payload lacks an installed kernel.'
+if grep -Eq '/home/liveuser(/|$)' "$report_dir/payload-files.txt"; then
+    die 'The temporary Live home directory is baked into the payload.'
+fi
+# Only extract the small metadata/configuration subset needed for verification.
+unsquashfs -no-progress -d "$temporary/root" "$temporary/payload.img" \
+    etc/passwd etc/shadow etc/selinux/config \
+    etc/fedora-dde-installer/install-profile.json \
+    etc/kernel/install.d etc/dracut.conf.d \
+    usr/lib/os-release usr/lib/kernel/install.d \
+    usr/lib/dracut/dracut.conf.d/02-rescue.conf \
+    usr/lib/systemd/system/fedora-dde-live.service usr/libexec/fedora-dde-live \
+    usr/share/fedora-dde-remix/rpm-manifest.txt \
+    usr/share/fedora-dde-remix/build-info.json \
+    usr/share/applications/fedora-dde-installer.desktop \
+    > "$report_dir/payload-extract.log"
+
+python3 - "$temporary/root" "$manifest" "$build_info" <<'PY'
+from pathlib import Path
+import json
+import re
+import sys
+root, manifest, build_info = map(Path, sys.argv[1:])
+def regular(relative):
+    path = root / relative
+    assert not path.is_symlink() and path.is_file(), f'Missing regular payload file: {relative}'
+    return path
+release = regular('usr/lib/os-release').read_text()
+assert re.search(r'^ID=["\']?fedora["\']?$', release, re.M), 'Not a Fedora payload'
+assert re.search(r'^VERSION_ID=["\']?45["\']?$', release, re.M), 'Not a Fedora 45 payload'
+for name in ('passwd', 'shadow'):
+    content = regular('etc/' + name).read_text()
+    assert not re.search(r'^liveuser:', content, re.M), 'Live account is present in the read-only payload'
+    if name == 'shadow':
+        assert all(line.split(':')[1] for line in content.splitlines() if line), 'An image account has an empty password'
+assert re.search(r'^SELINUX=disabled$', regular('etc/selinux/config').read_text(), re.M), 'SELinux config mismatch'
+profile = json.loads(regular('etc/fedora-dde-installer/install-profile.json').read_text())
+assert type(profile.get('schema')) is int and profile == {'schema': 1, 'selinux': 'disabled', 'pam': 'ddm-system-login'}, 'Installer profile mismatch'
+service = regular('usr/lib/systemd/system/fedora-dde-live.service').read_text()
+assert 'ConditionKernelCommandLine=rd.live.image' in service, 'Live service has no kernel condition'
+assert 'ExecStart=/usr/libexec/fedora-dde-live boot' in service, 'Live service does not use the boot helper'
+assert regular('usr/libexec/fedora-dde-live').stat().st_mode & 0o111, 'Live helper is not executable'
+assert 'Exec=/usr/bin/fedora-dde-installer-launch' in regular('usr/share/applications/fedora-dde-installer.desktop').read_text()
+for name in ('20-grub.install', '50-dracut.install', '51-dracut-rescue.install'):
+    hook = regular('usr/lib/kernel/install.d/' + name)
+    assert hook.stat().st_size and hook.stat().st_mode & 0o111, f'Disabled kernel hook: {name}'
+    override = root / 'etc/kernel/install.d' / name
+    if override.exists() or override.is_symlink():
+        override = regular('etc/kernel/install.d/' + name)
+        assert override.stat().st_size and override.stat().st_mode & 0o111, f'Masked kernel hook: {name}'
+rescue = regular('usr/lib/dracut/dracut.conf.d/02-rescue.conf')
+if (root / 'etc/dracut.conf.d/02-rescue.conf').exists():
+    rescue = regular('etc/dracut.conf.d/02-rescue.conf')
+assert re.search(r'''^\s*dracut_rescue_image\s*=\s*(["']?)yes\1\s*(?:#.*)?$''', rescue.read_text(), re.M), 'Rescue generation is disabled'
+included = regular('usr/share/fedora-dde-remix/rpm-manifest.txt').read_bytes()
+assert included == manifest.read_bytes(), 'The published manifest differs from the payload manifest'
+provenance = regular('usr/share/fedora-dde-remix/build-info.json').read_bytes()
+assert provenance == build_info.read_bytes(), 'The published build information differs from the payload'
+data = json.loads(provenance)
+expected = {'iso_repository': 'Fedora-DDE-Remix/ISO-Build',
+            'installer_repository': 'Fedora-DDE-Remix/fedora-dde-installer',
+            'fedora_release': '45', 'architecture': 'x86_64', 'selinux': 'disabled',
+            'copr': 'mozixun/Fedora-DDE-Remix', 'desktop_group': 'dde-desktop', 'live_login': 'manual'}
+assert isinstance(data, dict) and all(data.get(k) == v for k, v in expected.items()), 'Unexpected build information'
+assert all(re.fullmatch(r'[0-9a-f]{40}', data.get(k, '')) for k in ('iso_commit', 'installer_commit')), 'Invalid source commit'
+names = {line.split('\t')[0] for line in included.decode().splitlines()}
+required = {'dde-desktop-comps', 'ddm', 'dde-session', 'dde-shell', 'treeland',
+            'fedora-dde-installer', 'fedora-dde-remix-config', 'kernel-core',
+            'dracut-live', 'dracut-config-rescue', 'grub2-pc-modules', 'grub2-efi-x64-cdboot'}
+assert required <= names, f'Required RPMs missing: {sorted(required - names)}'
+assert 'systemd-homed' not in names, 'systemd-homed is not supported by this image'
+print(f'Payload verified: Fedora 45, {len(names)} package names, no baked-in Live account.')
+PY
+printf '%s\n' \
+    'BIOS and UEFI hybrid ISO entries: present' \
+    'All ISO Linux boot entries: rd.live.image and selinux=0' \
+    'Payload: direct read-only SquashFS with dmsquash-live initrd' \
+    'Conventional kernel-install and rescue hooks: preserved' \
+    'Temporary Live account and empty password entries: absent' \
+    'Embedded and external RPM manifests: identical' \
+    'Embedded and external build provenance JSON: validated and identical' \
+    'Structural checks only; VM boot and installation still require separate verification.' \
+    | tee "$report_dir/image-checks.txt"
