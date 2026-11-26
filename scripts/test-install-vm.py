@@ -2,7 +2,7 @@
 """Boot the final ISO, install it, and test the installed DDE desktop under QEMU.
 
 Host dependencies (Ubuntu 24.04): qemu-system-x86 qemu-utils ovmf xorriso
-tesseract-ocr, plus Python 3's standard library. Run outside the compose
+tesseract-ocr python3-pil. Run outside the compose
 container. KVM is probed, and an unavailable KVM is recorded before using TCG.
 
 Only the isolated qcow2 (64 GiB, or decimal 16 GB for uefi-small) and disposable
@@ -114,6 +114,25 @@ def greeter_evidence(screen, session, user, *, password_required=False):
             "reason": reason, "password_words": password_words, "user_words": user_words}
 
 
+def nonblack_frame(path):
+    # Lazy import keeps the separate host sudo/PTY smoke test independent of
+    # optional VM tools, which the workflow installs afterwards.
+    from PIL import Image, ImageChops
+    with Image.open(path) as image:
+        require(image.format == "PNG", "The desktop frame is not a PNG image.")
+        rgb = image.convert("RGB")
+        red, green, blue = rgb.split()
+        brightness = ImageChops.lighter(ImageChops.lighter(red, green), blue)
+        histogram = brightness.histogram()
+        pixels = rgb.width * rgb.height
+        visible_pixels = sum(histogram[17:])
+    fraction = visible_pixels / pixels
+    return {"nonblack": fraction >= 0.01, "width": rgb.width, "height": rgb.height,
+            "nonblack_pixel_fraction": round(fraction, 6), "channel_threshold": 16,
+            "minimum_fraction": 0.01,
+            "scope": "Nonblack frame evidence; complete desktop usability still requires visual review."}
+
+
 class Report:
     def __init__(self, directory, timeout):
         self.directory = directory
@@ -121,7 +140,8 @@ class Report:
         self.started = time.monotonic()
         self.deadline = self.started + timeout
         self.data = {"schema": 1, "status": "running", "started_at": utc(), "timeout_seconds": timeout,
-                     "scope": "Final ISO firmware boot, real backend installation, disk-only reboot, DDM Wayland login",
+                     "scope": "Final ISO firmware boot, real backend installation, disk-only reboot, DDM Wayland login with crash and nonblack-frame checks",
+                     "visual_review_required": True,
                      "secure_boot_tested": False, "stages": [], "evidence": {}}
         self.save()
 
@@ -674,7 +694,17 @@ class VM:
         log("GRUB accepted the original ISO search/kernel/initrd commands; booting and waiting for serial login.")
         self.serial.send("boot\n")
 
-    def wait_greeter(self, user, deadline, name, *, password_required=False, before_password=False):
+    def login_session(self, user, checkpoint, deadline, name):
+        remaining = deadline - time.monotonic()
+        require(remaining > 0, "The graphical login deadline expired.")
+        session = self.guest.check("session", user, str(checkpoint["observed_at_monotonic_us"]),
+            checkpoint["boot_id"], timeout=min(45, remaining), name=name)
+        require(not session["dde_shell_crashes"],
+                "The target user's dde-shell crashed after this graphical login began: "
+                + json.dumps(session["dde_shell_crashes"])[-4000:])
+        return session
+
+    def wait_greeter(self, user, deadline, name, *, checkpoint, password_required=False, before_password=False):
         # A black loading screen may recover. A compositor crash may instead
         # expose a getty whose issue text also contains the word "password".
         # Observe both processes and the screen; never send a wake-up Enter or
@@ -683,8 +713,7 @@ class VM:
         observations = []
         previous_reason = None
         while time.monotonic() < deadline:
-            session = self.guest.check("session", user,
-                timeout=min(45, max(1, deadline - time.monotonic())), name=f"{name}-session")
+            session = self.login_session(user, checkpoint, deadline, f"{name}-session")
             if before_password:
                 require(not session["ready"] and not session["ddm_sessions"],
                         "A graphical user session appeared before password entry (unexpected autologin).")
@@ -707,41 +736,62 @@ class VM:
         deadline = time.monotonic() + self.report.remaining(timeout)
         initial = self.guest.check("session", user, timeout=60, name="session-before-login")
         require(not initial["ready"] and not initial["ddm_sessions"], "A graphical user session appeared before password entry (unexpected autologin).")
+        checkpoint = {key: initial[key] for key in ("boot_id", "observed_at_monotonic_us")}
+        (self.output / "graphical-login-checkpoint.json").write_text(json.dumps(checkpoint, indent=2) + "\n")
         # Keep the guest's normal greeter and compositor. OCR locates the
         # password placeholder/user tile; no display-manager config is changed.
-        attempts = []
-        for attempt in range(2):
-            require(time.monotonic() < deadline, "The graphical login deadline expired.")
-            name = f"ddm-login-attempt-{attempt + 1}"
-            screen, evidence = self.wait_greeter(user, deadline, name, before_password=attempt == 0)
-            if not evidence["password_words"]:
-                # Click only an observed user tile, then wait for the resulting
-                # password UI before entering any credentials.
-                word = evidence["user_words"][0]
-                self.qmp.click(word["left"] + word["width"] / 2, word["top"] + word["height"] / 2,
-                               screen["width"], screen["height"])
-                screen, evidence = self.wait_greeter(user, deadline, name + "-password",
-                    password_required=True, before_password=attempt == 0)
-            word = evidence["password_words"][0]
+        screen, evidence = self.wait_greeter(user, deadline, "ddm-login",
+            checkpoint=checkpoint, before_password=True)
+        if not evidence["password_words"]:
+            # Click only an observed user tile, then wait for its password UI.
+            word = evidence["user_words"][0]
             self.qmp.click(word["left"] + word["width"] / 2, word["top"] + word["height"] / 2,
                            screen["width"], screen["height"])
-            self.qmp.key("ctrl", "a")
-            self.qmp.type(password)
-            self.qmp.key("ret")
-            window = min(deadline, time.monotonic() + (90 if attempt == 0 else 180))
-            last = None
-            while time.monotonic() < window:
-                time.sleep(3)
-                last = self.guest.check("session", user, timeout=45, name="session-login-progress")
-                if last["ready"]:
-                    time.sleep(8)
-                    stable = self.guest.check("session", user, timeout=45, name="session-stable")
-                    require(stable["ready"], "The DDM Wayland desktop crashed immediately after login.")
-                    self.screen("dde-desktop-after-login", deadline=deadline)
-                    return {"attempts": attempt + 1, "session": stable}
-            attempts.append(last)
+            screen, evidence = self.wait_greeter(user, deadline, "ddm-login-password",
+                checkpoint=checkpoint, password_required=True, before_password=True)
+        word = evidence["password_words"][0]
+        self.qmp.click(word["left"] + word["width"] / 2, word["top"] + word["height"] / 2,
+                       screen["width"], screen["height"])
+        self.qmp.key("ctrl", "a")
+        self.qmp.type(password)
+        self.qmp.key("ret")
+        # Submit once. A slow/black authenticated session never receives a
+        # second password; the remaining original deadline is for observation.
+        last = None
+        authenticated = False
+        visible_since = None
+        while time.monotonic() < deadline:
+            time.sleep(max(0, min(3, deadline - time.monotonic())))
+            if time.monotonic() >= deadline:
+                break
+            last = self.login_session(user, checkpoint, deadline, "session-login-progress")
+            if any(s.get("Service") == "ddm" and s.get("Class") == "user" for s in last["sessions"]):
+                authenticated = True
+            if last["ready"]:
+                path = self.screenshot("desktop-frame")
+                frame = dict(nonblack_frame(path), captured_at=utc(),
+                             screenshot=str(path.relative_to(self.output)))
+                with (self.output / "desktop-frame-events.jsonl").open("a") as events:
+                    events.write(json.dumps(frame) + "\n")
+                if frame["nonblack"]:
+                    now = time.monotonic()
+                    if visible_since is None:
+                        visible_since = now
+                    elif now - visible_since >= 8:
+                        stable = self.login_session(user, checkpoint, deadline, "session-stable")
+                        require(stable["ready"], "The graphical desktop session stopped during the stability check.")
+                        return {"attempts": 1, "session": stable,
+                                "nonblack_frame": frame, "nonblack_stable_seconds": round(now - visible_since, 3),
+                                "crash_check_checkpoint": checkpoint}
+                else:
+                    visible_since = None
+            else:
+                visible_since = None
+        if authenticated:
+            raise Failure("DDM authenticated the user, but no stable session with nonblack desktop frames "
+                          "appeared before the original graphical login deadline; see desktop-frame-events.jsonl.")
         raise Failure("DDM did not create a stable Wayland + dde-shell desktop after password login; "
-                      + json.dumps(attempts)[-3000:])
+                      + json.dumps(last)[-3000:])
 
     def poweroff(self):
         framing_error = None
@@ -782,6 +832,10 @@ class VM:
             try:
                 data = self.guest.check("diagnostics", timeout=180, name=name, budget=False)
                 (self.output / f"{name}.json").write_text(redact(json.dumps(data, indent=2)) + "\n")
+                for key, value in data.items():
+                    if re.fullmatch(r"dde_shell_(?:liveuser|vmtest)_coreinfo", key) and isinstance(value, dict):
+                        (self.output / f"{name}-{key}.txt").write_text(redact(value.get("stdout", ""))
+                            + "\n" + redact(value.get("stderr", "")))
             except Exception as error:
                 (self.output / f"{name}-error.txt").write_text(redact(str(error)) + "\n")
 
@@ -868,6 +922,10 @@ def main():
     signal.signal(signal.SIGINT, interrupted)
     try:
         with report.stage("host-preflight"):
+            try:
+                from PIL import Image
+            except ImportError as error:
+                raise Failure("Required host dependency is missing: python3-pil (Pillow).") from error
             for name in ("qemu-system-x86_64", "qemu-img", "xorriso", "tesseract"):
                 require(shutil.which(name), f"Required host command is missing: {name}")
             helper = Path(__file__).resolve().with_name("vm-guest.py")
@@ -980,7 +1038,8 @@ def main():
             raise Failure("Installation, disk-only reboot and installed-system checks completed, "
                           f"but desktop stages failed ({phases}); this diagnostic run has not passed.")
         report.data.update(status="passed", finished_at=utc(), iso_unchanged=True)
-        log("PASS: final ISO installed through the real backend; disk-only reboot, Enforcing SELinux and both DDM desktops verified.")
+        log("PASS automated checks: real installation, disk-only reboot, Enforcing SELinux, DDM sessions "
+            "and stable nonblack frames verified. Review the captured desktop images for usability.")
     except BaseException as error:
         failure = error
         report.data.update(status="failed", finished_at=utc(), error=redact(str(error)))

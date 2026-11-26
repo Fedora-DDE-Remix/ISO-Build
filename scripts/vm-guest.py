@@ -77,10 +77,13 @@ def processes():
         if not path.name.isdecimal():
             continue
         try:
-            result.append({"pid": int(path.name), "uid": path.stat().st_uid,
+            entry = {"pid": int(path.name), "uid": path.stat().st_uid,
                            "comm": (path / "comm").read_text().strip(),
                            "exe": os.readlink(path / "exe"),
-                           "label": (path / "attr/current").read_text().strip()})
+                           "label": (path / "attr/current").read_text().strip()}
+            if entry["exe"] == "/usr/bin/dde-shell":
+                entry["cmdline"] = (path / "cmdline").read_text().rstrip("\0").split("\0")
+            result.append(entry)
         except (OSError, UnicodeError):
             continue
     return result
@@ -233,8 +236,35 @@ def baseline(phase, expected_uuid=""):
     return result
 
 
-def session(user):
+def shell_crashes(uid, boot_id, since_monotonic_us):
+    fields = "__MONOTONIC_TIMESTAMP,_BOOT_ID,COREDUMP_UID,COREDUMP_PID,COREDUMP_EXE,COREDUMP_SIGNAL,COREDUMP_SIGNAL_NAME"
+    output = run(["journalctl", "-b", "--no-pager", "-o", "json", "--output-fields=" + fields,
+                  f"COREDUMP_UID={uid}", "COREDUMP_EXE=/usr/bin/dde-shell"], timeout=15).stdout
+    crashes = []
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        event = json.loads(line)
+        require(event.get("_BOOT_ID") == boot_id.replace("-", "")
+                and event.get("COREDUMP_UID") == str(uid)
+                and event.get("COREDUMP_EXE") == "/usr/bin/dde-shell",
+                "Unexpected identity in the filtered dde-shell crash journal.")
+        timestamp = int(event["__MONOTONIC_TIMESTAMP"])
+        if timestamp >= since_monotonic_us:
+            crashes.append(event)
+    return crashes
+
+
+def session(user, since_monotonic_us=None, expected_boot_id=None):
+    observed_at = time.monotonic_ns() // 1000
+    boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
     uid = pwd.getpwnam(user).pw_uid
+    crashes = []
+    if since_monotonic_us is not None:
+        require(expected_boot_id == boot_id, "The guest rebooted during the graphical login check.")
+        since_monotonic_us = int(since_monotonic_us)
+        require(0 <= since_monotonic_us <= observed_at, "Invalid graphical-login monotonic checkpoint.")
+        crashes = shell_crashes(uid, boot_id, since_monotonic_us)
     sessions = []
     for line in run(["loginctl", "list-sessions", "--no-legend", "--no-pager"]).stdout.splitlines():
         if not line.split():
@@ -251,7 +281,9 @@ def session(user):
     # Treeland can be a system compositor managed by DDM. Do not incorrectly
     # require its UID to equal the authenticated desktop user's UID.
     compositor = [p for p in procs if p["comm"] == "treeland"]
-    return {"user": user, "uid": uid, "ready": bool(matching and shell and compositor),
+    return {"user": user, "uid": uid, "ready": bool(matching and shell and compositor and not crashes),
+            "boot_id": boot_id, "observed_at_monotonic_us": observed_at,
+            "dde_shell_crashes": crashes,
             "sessions": sessions, "ddm_sessions": matching, "dde_shell": shell, "treeland": compositor,
             "wayland_sockets": [str(p) for p in Path(f"/run/user/{uid}").glob("wayland-*") if p.is_socket()]}
 
@@ -484,20 +516,51 @@ def pam_check(user):
 
 
 def diagnostics():
+    boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip().replace("-", "")
     commands = {"journal": ["journalctl", "-b", "--no-pager", "-n", "250", "-o", "short-monotonic"],
                 "ddm": ["journalctl", "-b", "-u", "ddm.service", "-u", "treeland.service", "--no-pager", "-n", "200"],
                 "failed_units": ["systemctl", "--failed", "--no-pager"],
                 "sessions": ["loginctl", "list-sessions", "--no-pager"],
                 "process_labels": ["ps", "-eZ"],
                 "avc": ["ausearch", "-m", "AVC,USER_AVC", "-ts", "boot", "--raw"],
-                "coredumps": ["coredumpctl", "list", "--no-pager", "--since", "today"],
+                "coredumps": ["coredumpctl", "list", "--no-pager", "_BOOT_ID=" + boot_id],
                 "disks": ["lsblk", "-f"], "mounts": ["findmnt"],
                 "treeland_units": ["systemctl", "cat", "treeland.service"]}
-    result = {}
-    for name, command in commands.items():
+    for user in ("liveuser", USERNAME):
         try:
-            value = run(command, check=False, timeout=15)
-            result[name] = {"status": value.returncode, "stdout": (value.stdout or "")[-45000:],
+            uid = pwd.getpwnam(user).pw_uid
+        except KeyError:
+            continue
+        commands[f"dde_shell_{user}_journal"] = ["journalctl", "-b", "--no-pager", "-n", "200",
+            "-o", "short-monotonic", "_COMM=dde-shell", f"_UID={uid}"]
+        commands[f"desktop_plugin_{user}_journal"] = ["journalctl", "-b", "--no-pager", "-n", "200",
+            "-o", "short-monotonic", f"_UID={uid}",
+            "_SYSTEMD_USER_UNIT=dde-shell-plugin@org.deepin.ds.desktop.service"]
+        # coredumpctl has no --boot option. Explicit journal matches identify
+        # this boot/user, and -1 bounds info to the latest matching crash.
+        commands[f"dde_shell_{user}_coreinfo"] = ["coredumpctl", "--no-pager", "-1", "info",
+            "_BOOT_ID=" + boot_id, f"COREDUMP_UID={uid}", "COREDUMP_EXE=/usr/bin/dde-shell"]
+    result = {"dde_shell_processes": [p for p in processes() if p["exe"] == "/usr/bin/dde-shell"]}
+    deadline = time.monotonic() + 160
+    # Collect the specific crash trace before general journal output can spend
+    # the bounded diagnostics budget. Never request or export core bytes.
+    ordered = sorted(commands, key=lambda name: (not name.endswith("_coreinfo"),
+                                                 not name.startswith("desktop_plugin"), name))
+    for name in ordered:
+        command = commands[name]
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                result[name] = {"error": "The bounded diagnostics collection deadline expired."}
+                continue
+            value = run(command, check=False, timeout=min(15, remaining))
+            output = value.stdout or ""
+            limit = 256 * 1024 if name.endswith("_coreinfo") else 45000
+            # Keep the top of core info (including its first stack frames),
+            # rather than silently retaining only the tail of a large trace.
+            retained = output[:limit] if name.endswith("_coreinfo") else output[-limit:]
+            result[name] = {"status": value.returncode, "stdout": retained,
+                            "stdout_characters": len(output), "stdout_truncated": len(output) > limit,
                             "stderr": (value.stderr or "")[-3000:]}
         except (OSError, subprocess.TimeoutExpired) as error:
             result[name] = {"error": str(error)}

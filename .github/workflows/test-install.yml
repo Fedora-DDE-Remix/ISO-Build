@@ -103,7 +103,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf xorriso tesseract-ocr acl
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf xorriso tesseract-ocr python3-pil acl
           mkdir -p artifacts/vm "$RUNNER_TEMP/fedora-dde-install-vm"
           if [[ -e /dev/kvm ]]; then
             sudo setfacl -m "u:$(id -u):rw" /dev/kvm
@@ -169,7 +169,7 @@ jobs:
           if [[ "$CONTINUE_AFTER_DESKTOP_FAILURE" == true ]]; then
             diagnostic_options+=(--continue-after-desktop-failure)
           fi
-          python3 scripts/test-install-vm.py \
+          /usr/bin/python3 scripts/test-install-vm.py \
             --iso "${images[0]}" \
             --work-dir "$RUNNER_TEMP/fedora-dde-install-vm" \
             --output-dir artifacts/vm/test --timeout 5400 \
