@@ -75,9 +75,9 @@ def log(message):
     print(f"[{utc()}] vm-test: {redact(str(message))}", flush=True)
 
 
-def command(argv, *, timeout=120, check=True, input_text=None):
+def command(argv, *, timeout=120, check=True, input_text=None, env=None):
     result = subprocess.run(argv, input=input_text, text=True, encoding="utf-8", errors="replace",
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, env=env)
     if check and result.returncode:
         raise Failure(f"{argv[0]} failed ({result.returncode}): {(result.stderr or '')[-4000:]}")
     return result
@@ -88,19 +88,28 @@ def greeter_evidence(screen, session, user, *, password_required=False):
     text = screen["text"]
     terminal = re.search(r"\blogin\s*:|\bKernel\s+\S+\s+on\s+\S+|"
                          r"Fedora\s+DDE\s+Remix\s+Live:\s+username", text, re.I)
-    names = {user.casefold(), "live" if user == LIVE_USER else user.casefold()}
+    boot_console = (len(re.findall(r"\b(?:Starting|Started|Finished|Reached|Created|Listening)\b", text)) >= 3
+                    and len(re.findall(r"\b(?:service|target|socket|slice)\b", text, re.I)) >= 3)
     password_words = [w for w in screen["words"]
                       if w["text"].casefold().strip(".,:;!?") == "password"]
-    user_words = [w for w in screen["words"] if w["text"].casefold().strip(".,:") in names]
+    labels = [w["text"].casefold().strip(".,:") for w in screen["words"]]
+    user_words = [w for w, label in zip(screen["words"], labels) if label == user.casefold()]
+    if user == LIVE_USER:
+        # The actual greeter displays "Live User". A lone "Live" also occurs
+        # in the systemd "Prepare the Fedora DDE Live installer" boot message.
+        user_words += [w for index, w in enumerate(screen["words"][:-1])
+                       if labels[index:index + 2] == ["live", "user"]]
     if terminal:
         reason = "A text getty is visible; it is not the DDM graphical greeter."
+    elif boot_console:
+        reason = "System startup messages are visible; they are not the DDM graphical greeter."
     elif not session["treeland"]:
         reason = "No running Treeland compositor was observed."
     elif not password_words and (password_required or not user_words):
         reason = "No graphical password prompt or matching user tile was observed."
     else:
         reason = "Running Treeland and graphical login controls were observed."
-    return {"ready": not terminal and bool(session["treeland"])
+    return {"ready": not terminal and not boot_console and bool(session["treeland"])
                      and bool(password_words or (user_words and not password_required)),
             "reason": reason, "password_words": password_words, "user_words": user_words}
 
@@ -567,12 +576,41 @@ class VM:
         self.qmp.execute("screendump", {"filename": str(path), "format": "png"})
         return path
 
-    def screen(self, name=None):
+    def screen(self, name=None, *, deadline=None):
+        deadline = self.report.deadline if deadline is None else deadline
         path = self.screenshot(name)
         image = path.read_bytes()
         require(image.startswith(b"\x89PNG\r\n\x1a\n"), "QMP did not produce a PNG screenshot.")
         width, height = struct.unpack(">II", image[16:24])
-        value = command(["tesseract", str(path), "stdout", "--psm", "11", "tsv"], timeout=30).stdout
+        # Tesseract explicitly requests OpenMP threads internally. A thread
+        # limit, not only OMP_NUM_THREADS, prevents OCR competing with all VM
+        # vCPUs. Retry one transient timeout within the caller's same deadline.
+        environment = dict(os.environ, OMP_THREAD_LIMIT="1", OMP_NUM_THREADS="1")
+        for attempt in (1, 2):
+            remaining = deadline - time.monotonic()
+            require(remaining > 0, "The screen OCR deadline expired; no graphical controls were accepted.")
+            timeout = min(30, remaining)
+            started = time.monotonic()
+            event = {"started_at": utc(), "screenshot": path.name, "attempt": attempt,
+                     "timeout_seconds": round(timeout, 3), "omp_thread_limit": 1, "omp_num_threads": 1}
+            try:
+                value = command(["tesseract", str(path), "stdout", "--psm", "11", "tsv"],
+                                timeout=timeout, env=environment).stdout
+            except subprocess.TimeoutExpired as error:
+                event.update(status="timeout", elapsed_seconds=round(time.monotonic() - started, 3))
+                with (self.output / "ocr-events.jsonl").open("a") as events:
+                    events.write(json.dumps(event) + "\n")
+                if not name:
+                    shutil.copyfile(path, self.snapshots / f"{self.counter:03d}-ocr-timeout.png")
+                log(f"Host OCR timeout on {path.name}, attempt {attempt}/2; no partial OCR output was accepted.")
+                if attempt == 2 or time.monotonic() >= deadline:
+                    raise Failure("Host screen OCR timed out within its bounded attempts/deadline; "
+                                  "see ocr-events.jsonl and the retained screenshot.") from error
+            else:
+                event.update(status="completed", elapsed_seconds=round(time.monotonic() - started, 3))
+                with (self.output / "ocr-events.jsonl").open("a") as events:
+                    events.write(json.dumps(event) + "\n")
+                break
         words = []
         for line in value.splitlines()[1:]:
             fields = line.split("\t", 11)
@@ -591,7 +629,7 @@ class VM:
         deadline = time.monotonic() + self.report.remaining(timeout)
         while time.monotonic() < deadline:
             require(self.process.poll() is None, "QEMU exited before the ISO boot menu.")
-            screen = self.screen()
+            screen = self.screen(deadline=deadline)
             if re.search(r"GNU\s+GRUB|Start\s+Fedora|Test\s+this\s+media|Troubleshooting", screen["text"], re.I):
                 self.screenshot("iso-grub-menu")
                 log("Observed the final ISO GRUB menu; configuring and synchronizing its serial console.")
@@ -650,7 +688,7 @@ class VM:
             if before_password:
                 require(not session["ready"] and not session["ddm_sessions"],
                         "A graphical user session appeared before password entry (unexpected autologin).")
-            screen = self.screen(f"{name}-{len(observations) + 1:02d}")
+            screen = self.screen(f"{name}-{len(observations) + 1:02d}", deadline=deadline)
             evidence = greeter_evidence(screen, session, user, password_required=password_required)
             observations.append({"observed_at": utc(), "ready": evidence["ready"],
                 "reason": evidence["reason"], "screenshot": str(Path(screen["path"]).relative_to(self.output)),
@@ -699,7 +737,7 @@ class VM:
                     time.sleep(8)
                     stable = self.guest.check("session", user, timeout=45, name="session-stable")
                     require(stable["ready"], "The DDM Wayland desktop crashed immediately after login.")
-                    self.screen("dde-desktop-after-login")
+                    self.screen("dde-desktop-after-login", deadline=deadline)
                     return {"attempts": attempt + 1, "session": stable}
             attempts.append(last)
         raise Failure("DDM did not create a stable Wayland + dde-shell desktop after password login; "
@@ -738,7 +776,8 @@ class VM:
         if self.process is None or self.process.poll() is not None:
             return
         with contextlib.suppress(Exception):
-            self.screen("failure-or-final-state" if name == "diagnostics" else name + "-state")
+            self.screen("failure-or-final-state" if name == "diagnostics" else name + "-state",
+                        deadline=time.monotonic() + 60)
         if self.guest and self.guest.recover():
             try:
                 data = self.guest.check("diagnostics", timeout=180, name=name, budget=False)
