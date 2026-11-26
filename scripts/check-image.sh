@@ -58,8 +58,9 @@ grep -Eq '/usr/lib/modules/[^/]+/vmlinuz$' "$report_dir/payload-files.txt" || di
 if grep -Eq '/home/liveuser(/|$)' "$report_dir/payload-files.txt"; then
     die 'The temporary Live home directory is baked into the payload.'
 fi
-# Extract metadata plus the critical binaries whose actual SELinux xattrs must
-# survive the final SquashFS. Checking file_contexts alone would miss lost xattrs.
+# Extract the critical binaries, underlying mountpoint directories and the
+# image's complete file-context database (including .bin/.local/substitutions).
+# Directory xattrs follow that persistent map, not mounted procfs/sysfs types.
 label_paths=$(python3 "$script_dir/check-selinux.py" paths)
 mapfile -t selinux_paths <<< "$label_paths"
 unsquashfs -xattrs -no-progress -d "$temporary/root" "$temporary/payload.img" \
@@ -139,7 +140,7 @@ printf '%s\n' \
     'BIOS and UEFI hybrid ISO entries: present' \
     'All ISO Linux boot entries: rd.live.image, selinux=1 and enforcing=1' \
     'Payload: direct read-only SquashFS with dmsquash-live initrd' \
-    'Actual payload SELinux xattrs: checked on core system and DDM files' \
+    'Actual payload SELinux xattrs: core system/DDM types and image-policy mountpoint contexts verified' \
     'Conventional kernel-install and rescue hooks: preserved' \
     'Temporary Live account and empty password entries: absent' \
     'Embedded and external RPM manifests: identical' \

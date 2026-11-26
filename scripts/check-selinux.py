@@ -31,7 +31,7 @@ LABELS = {
     "usr/libexec/ddm-helper": "xdm_exec_t",
     "usr/lib/systemd/system/treeland.service": "xdm_unit_file_t",
 }
-DIRECTORY_LABELS = {"dev": "device_t", "proc": "proc_t", "sys": "sysfs_t", "run": "var_run_t"}
+DIRECTORY_PATHS = ("dev", "proc", "sys", "run")
 CONTEXTS = "etc/selinux/targeted/contexts/files/file_contexts"
 COMMAND_ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"}
 
@@ -98,15 +98,34 @@ def policy_file(root: Path) -> Path:
     return max(candidates)[1]
 
 
+def directory_contexts(root: Path) -> dict[str, str]:
+    """Look up on-disk mountpoints, not the genfs labels of mounted pseudo-FS."""
+    contexts = regular(root, CONTEXTS)
+    require(contexts.stat().st_size > 0, "The targeted file-context map is empty")
+    # libselinux also reads local, homedirs, substitution and compiled sidecars.
+    # These must all come from the image and must not escape through symlinks.
+    for path in contexts.parent.glob("file_contexts*"):
+        regular(root, str(path.relative_to(root)))
+    result = {}
+    for relative in DIRECTORY_PATHS:
+        image_path(root, relative, directory=True)
+        expected = run("matchpathcon", "-N", "-n", "-m", "d", "-f", str(contexts), "/" + relative).strip()
+        require(re.fullmatch(r"system_u:object_r:[A-Za-z0-9_]+:s0", expected) is not None,
+                f"The image has no valid persistent directory context for /{relative}: {expected!r}")
+        result[relative] = expected
+    return result
+
+
 def verify_labels(root: Path) -> None:
     configuration(root)
-    for relative, kind in (LABELS | DIRECTORY_LABELS).items():
-        path = image_path(root, relative, directory=relative in DIRECTORY_LABELS)
+    expected_paths = {relative: f"system_u:object_r:{kind}:s0" for relative, kind in LABELS.items()}
+    expected_paths.update(directory_contexts(root))
+    for relative, expected in expected_paths.items():
+        path = image_path(root, relative, directory=relative in DIRECTORY_PATHS)
         try:
             actual = os.getxattr(path, "security.selinux", follow_symlinks=False).rstrip(b"\0").decode("ascii")
         except (OSError, UnicodeError) as error:
             raise CheckError(f"Cannot read the payload's SELinux label: /{relative}: {error}") from error
-        expected = f"system_u:object_r:{kind}:s0"
         require(actual == expected, f"Incorrect payload label on /{relative}: {actual!r}; expected {expected}")
         print(f"PASS label /{relative}: {actual}")
 
@@ -124,7 +143,9 @@ def verify_policy() -> None:
     policy = policy_file(root)
     contexts = regular(root, CONTEXTS)
     require(contexts.stat().st_size > 0, "The targeted file-context map is empty")
-    expected_paths = LABELS | DIRECTORY_LABELS
+    expected_paths = dict(LABELS)
+    for relative, expected in directory_contexts(root).items():
+        print(f"PASS persistent mountpoint context /{relative}: {expected}")
     # The maintained policies deliberately map these helpers to bin_t. Use
     # actual packaged executables instead of guessing their changing names.
     for relative in ("usr/lib/deepin-daemon", "usr/lib/deepin-api"):
@@ -135,13 +156,11 @@ def verify_policy() -> None:
         expected_paths.update({str(path.relative_to(root)): "bin_t" for path in helpers})
     paths = []
     for relative, kind in expected_paths.items():
-        is_directory = relative in DIRECTORY_LABELS
-        path = image_path(root, relative, directory=is_directory)
+        path = regular(root, relative)
         expected = f"system_u:object_r:{kind}:s0"
         actual = run("matchpathcon", "-n", str(path)).strip()
         require(actual == expected, f"The installed policy maps {path} to {actual!r}, expected {expected}")
-        if not is_directory:
-            paths.append(str(path))
+        paths.append(str(path))
     # -n does not relabel; -c validates contexts against the image's compiled
     # policy, including on a builder whose kernel has SELinux disabled.
     run("setfiles", "-n", "-c", str(policy), str(contexts), *paths)
@@ -212,7 +231,7 @@ def main() -> int:
         else:
             require(args.root is None, "This mode does not accept an image-root path")
             if args.mode == "paths":
-                print("\n".join(LABELS | DIRECTORY_LABELS))
+                print("\n".join((*LABELS, *DIRECTORY_PATHS, str(Path(CONTEXTS).parent))))
             else:
                 verify_policy()
     except (CheckError, OSError, ValueError) as error:

@@ -28,7 +28,7 @@ dnf group info dde-desktop | tee /output/dde-desktop-group.txt
 rpm -q dde-desktop-comps | tee /output/comps-version.txt
 
 dnf -y install git rpm-build \
-    lorax-lmc-novirt systemd-rpm-macros tar gzip python3
+    lorax-lmc-novirt systemd-rpm-macros tar gzip python3 libselinux-utils
 
 actual_ref=$(git -c safe.directory=/installer -C /installer rev-parse HEAD)
 [[ $actual_ref == "$INSTALLER_REF" ]]
@@ -44,10 +44,10 @@ from pathlib import Path
 marker = Path('/installer-rpms/verified-input.json')
 approved = {
     'schema': 1,
-    'commit': 'cee14c9f2f0afdad066a08a401894a89a6cf9957',
-    'run_id': 45097911923,
-    'artifact_id': 14784695594,
-    'sha256': '4aff8b5fde96249882e09e2cb032f2a5ee4eeca39bd178f62531ec48d3b2a828',
+    'commit': 'e10bf53ad51e0dea7cc5133052a0d8e0dc6bcce9',
+    'run_id': 45837838480,
+    'artifact_id': 15127527642,
+    'sha256': 'de0d2ce8467bdb0ace5c6a4719198b437e631e7b86127bc89b02959a29958751',
 }
 
 def unique_keys(pairs):
@@ -102,7 +102,7 @@ if [[ $installer_input_mode == source-build ]]; then
         tee /output/logs/installer-rpmbuild.log
     installer_input_dir=$installer_top
 else
-    echo 'Reusing installer RPMs from verified Actions run 45097911923.'
+    echo 'Reusing installer RPMs from verified Actions run 45837838480.'
     installer_input_dir=/installer-rpms
 fi
 
@@ -167,8 +167,8 @@ try:
                    '/installer/packaging/fedora-dde-installer.spec').split('\t')
     if len(expected) != 4 or expected[0] != 'fedora-dde-installer':
         raise ValueError('cannot determine the pinned installer spec identity')
-    if reuse and expected[2] != '0.2.1':
-        raise ValueError('the approved installer artifact must match version 0.2.1')
+    if reuse and expected[2] != '0.2.2':
+        raise ValueError('the approved installer artifact must match version 0.2.2')
     binary_info = inspect(binary, expected, False)
     source_info = inspect(source, expected, True)
     if binary_info['source_rpm'] != source.name:
