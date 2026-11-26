@@ -376,28 +376,61 @@ def firmware_paths(args):
     return code.resolve(), variables.resolve()
 
 
-def accelerator(output):
-    request = '\n'.join(json.dumps({"execute": name}) for name in ("qmp_capabilities", "query-kvm", "quit")) + "\n"
-    argv = ["qemu-system-x86_64", "-machine", "q35,accel=kvm", "-cpu", "host", "-m", "128",
-            "-nodefaults", "-display", "none", "-S", "-qmp", "stdio"]
+def accelerator(output, work):
+    logfile = output / "kvm-probe.log"
+    # query-kvm's enabled flag alone is not proof that initialization completed.
+    # Sending query-kvm and quit together can terminate QEMU before it opens
+    # /dev/kvm. Check access, then require a genuinely running probe machine.
     try:
-        result = command(argv, timeout=20, check=False, input_text=request)
-        (output / "kvm-probe.log").write_text(result.stdout + result.stderr)
-        values = []
-        for line in result.stdout.splitlines():
+        descriptor = os.open("/dev/kvm", os.O_RDWR | os.O_CLOEXEC)
+        os.close(descriptor)
+    except OSError as error:
+        reason = f"Cannot open /dev/kvm: {error}"
+        logfile.write_text(reason + "\n")
+        return "tcg", {"available": False, "reason": reason}
+
+    qmp_path = work / "kvm-probe-qmp.sock"
+    require(len(str(qmp_path)) < 104, "Use a shorter --work-dir for UNIX socket paths.")
+    argv = ["qemu-system-x86_64", "-machine", "q35,accel=kvm", "-cpu", "host", "-m", "128",
+            "-nodefaults", "-display", "none", "-monitor", "none", "-S",
+            "-qmp", f"unix:{qmp_path},server=on,wait=off"]
+    process = control = None
+    try:
+        with logfile.open("w") as diagnostic:
+            process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=diagnostic,
+                                       stderr=subprocess.STDOUT, start_new_session=True)
+            control = QMP(qmp_path, process, output / "kvm-probe-events.jsonl")
+            stopped = control.execute("query-status")
+            require(stopped.get("status") == "prelaunch" and not stopped.get("running"),
+                    "KVM probe did not reach its initialized prelaunch state.")
+            control.execute("cont")
+            running = control.execute("query-status")
+            kvm = control.execute("query-kvm")
+            require(running.get("status") == "running" and running.get("running") is True
+                    and kvm.get("enabled") is True, "KVM probe did not enter the running state.")
+            time.sleep(0.5)
+            require(process.poll() is None, "KVM probe exited during initial execution.")
+            control.execute("quit")
+            status = process.wait(timeout=5)
+            require(status == 0, "KVM probe did not exit cleanly.")
+            return "kvm", {"available": True, "probe_status": status,
+                           "initialized_status": stopped, "running_status": running, "qmp": kvm}
+    except (Failure, OSError, subprocess.TimeoutExpired) as error:
+        reason = str(error)
+        if logfile.exists():
+            reason += "\n" + logfile.read_text(errors="replace")[-3000:]
+        return "tcg", {"available": False, "reason": reason.strip()}
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
             try:
-                values.append(json.loads(line))
-            except ValueError:
-                continue
-        enabled = result.returncode == 0 and any(v.get("return", {}).get("enabled") is True for v in values
-                                               if isinstance(v.get("return"), dict))
-        if enabled:
-            return "kvm", {"available": True, "probe_status": result.returncode}
-        return "tcg", {"available": False, "probe_status": result.returncode,
-                        "reason": (result.stderr or result.stdout)[-3000:]}
-    except (OSError, subprocess.TimeoutExpired) as error:
-        (output / "kvm-probe.log").write_text(str(error) + "\n")
-        return "tcg", {"available": False, "reason": str(error)}
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        if control is not None:
+            control.close()
+        qmp_path.unlink(missing_ok=True)
 
 
 class VM:
@@ -427,29 +460,54 @@ class VM:
         if phase == "live":
             argv += ["-drive", f"if=none,id=live,format=raw,media=cdrom,readonly=on,file={args.iso}",
                      "-device", "ide-cd,drive=live,bus=ide.0,bootindex=1"]
-        self.command = argv
-        (output / "qemu-command.json").write_text(json.dumps(argv, indent=2) + "\n")
-        self.logfile = (output / "qemu.log").open("w")
-        try:
-            self.process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=self.logfile,
-                                            stderr=subprocess.STDOUT, start_new_session=True)
-            self.qmp = QMP(qmp_path, self.process, output / "qmp-events.jsonl")
-            supported = {item["name"] for item in self.qmp.execute("query-commands")}
-            if "query-accelerators" in supported:
-                acceleration = self.qmp.execute("query-accelerators")
-                actual = acceleration["enabled"]
-            else:
-                acceleration = self.qmp.execute("query-kvm")
-                actual = "kvm" if acceleration["enabled"] else "tcg"
-            require(actual == accel, "QEMU's actual accelerator differs from the recorded selection.")
-            self.report.data["acceleration"][phase] = {"actual": actual, "qmp": acceleration}
-            self.report.save()
-            self.serial = Serial(serial_path, self.process)
-            self.guest = Guest(self.serial, report, output)
-            self.qmp.execute("cont")
-        except BaseException:
-            self.close()
-            raise
+        for selected in (("kvm", "tcg") if accel == "kvm" else ("tcg",)):
+            argv[argv.index("-machine") + 1] = f"q35,accel={selected}"
+            argv[argv.index("-cpu") + 1] = "host" if selected == "kvm" else "max"
+            self.command = list(argv)
+            (output / "qemu-command.json").write_text(json.dumps(argv, indent=2) + "\n")
+            self.logfile = (output / "qemu.log").open("w")
+            try:
+                self.process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=self.logfile,
+                                                stderr=subprocess.STDOUT, start_new_session=True)
+                self.qmp = QMP(qmp_path, self.process, output / "qmp-events.jsonl")
+                supported = {item["name"] for item in self.qmp.execute("query-commands")}
+                if "query-accelerators" in supported:
+                    acceleration = self.qmp.execute("query-accelerators")
+                    actual = acceleration["enabled"]
+                else:
+                    acceleration = self.qmp.execute("query-kvm")
+                    actual = "kvm" if acceleration["enabled"] else "tcg"
+                require(actual == selected, "QEMU's actual accelerator differs from the recorded selection.")
+                self.serial = Serial(serial_path, self.process)
+                self.guest = Guest(self.serial, report, output)
+                self.qmp.execute("cont")
+                status = self.qmp.execute("query-status")
+                require(status.get("status") == "running" and status.get("running") is True,
+                        "QEMU did not enter the running state.")
+                self.report.data["acceleration"][phase] = {"actual": actual, "qmp": acceleration, "status": status}
+                self.report.data["acceleration"]["selected"] = selected
+                self.report.save()
+                break
+            except BaseException as error:
+                # Only an explicit accelerator initialization error permits a
+                # retry. Firmware, image, QMP and guest failures stay failures.
+                exited_before_qmp = (self.qmp is None and self.process is not None
+                                     and self.process.poll() is not None)
+                self.close()
+                diagnostic = (output / "qemu.log").read_text(errors="replace")
+                if not (isinstance(error, Failure) and selected == "kvm" and exited_before_qmp
+                        and re.search(r"(?im)^.*failed to initialize kvm: (?:Permission denied|Operation not permitted|No such file or directory|No such device)", diagnostic)):
+                    raise
+                shutil.copyfile(output / "qemu.log", output / "kvm-startup-failed.log")
+                shutil.copyfile(output / "qemu-command.json", output / "kvm-startup-failed-command.json")
+                self.report.data["acceleration"].setdefault("startup_fallbacks", []).append({
+                    "phase": phase, "from": "kvm", "to": "tcg",
+                    "reason": diagnostic.strip(), "qemu_exit_status": self.process.returncode})
+                self.report.save()
+                log(f"KVM initialization failed; retrying this VM with TCG: {diagnostic.strip()}")
+                self.qmp = self.serial = self.guest = self.process = None
+                qmp_path.unlink(missing_ok=True)
+                serial_path.unlink(missing_ok=True)
 
     def screenshot(self, name=None):
         self.counter += 1
@@ -667,7 +725,7 @@ def main():
             uefi = not args.scenario.startswith("bios-")
             firmware, variables = firmware_paths(args) if uefi else (None, None)
             disk_size = 16_000_000_000 if args.scenario == "uefi-small" else 64 * 1024**3
-            accel, probe = accelerator(output)
+            accel, probe = accelerator(output, work)
             log(f"Using {accel.upper()}, {cpus} vCPUs, {memory} MiB RAM; KVM probe {'passed' if accel == 'kvm' else 'failed, real TCG fallback will run'}.")
             report.data.update(iso={"filename": args.iso.name, "sha256": sha256(args.iso), "size": args.iso.stat().st_size},
                                acceleration={"selected": accel, "kvm_probe": probe},
@@ -720,7 +778,8 @@ def main():
             vm = None
 
         with report.stage("boot-installed-disk-without-iso"):
-            vm = VM(args, report, work, output / "installed", firmware, accel, cpus, memory, "installed")
+            vm = VM(args, report, work, output / "installed", firmware,
+                    report.data["acceleration"]["selected"], cpus, memory, "installed")
             require(not any("id=live" in arg or str(args.iso) in arg for arg in vm.command), "The installed VM still has the ISO attached.")
             vm.guest.login(TEST_USER, TEST_PASSWORD, report.remaining(args.boot_timeout))
             vm.guest.upload_helper(helper, args.scenario,
