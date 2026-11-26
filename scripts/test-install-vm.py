@@ -285,15 +285,31 @@ class Guest:
         self.serial.send(user + "\n")
         self.serial.expect(r"Password:\s*", max(1, deadline - time.monotonic()))
         self.serial.send(password + "\n")
-        self.serial.expect(r"(?:^|\n)[^\n]{0,180}[\$#] ?$", max(1, deadline - time.monotonic()))
-        self.serial.send("sudo -S -p '__VM_SUDO_PASSWORD__' -i\n")
-        _, response = self.serial.expect(r"(?:^|\n)__VM_SUDO_PASSWORD__|(?:^|\n)[^\n]{0,180}# ?$", 60)
-        if "__VM_SUDO_PASSWORD__" in response:
-            self.serial.send(password + "\n")
-            self.serial.expect(r"(?:^|\n)[^\n]{0,180}# ?$", 60)
-        self.serial.send("stty -echo; export PS1='__VM_ROOT_READY__ '; export HISTFILE=/dev/null; set +o history; printf '\\n__VM_ROOT_READY__\\n'\n")
-        self.serial.expect(r"\n__VM_ROOT_READY__\n", 30)
+        self.serial.expect(r"(?:^|\n)\[" + re.escape(user) + r"@[^\]\n]{1,150}\]\$ ?$",
+                           max(1, deadline - time.monotonic()))
+        token = uuid.uuid4().hex[:12]
+        password_token = "__VM_SUDO_PASSWORD_" + token + "__"
+        root_token = "__VM_ROOT_UID_" + token + "__"
+        root_script = ("stty -echo; export PS1='__VM_ROOT_READY__ '; export HISTFILE=/dev/null; "
+                       "set +o history; vm_uid=$(/usr/bin/id -u); "
+                       f"printf '\\n{root_token}%s\\n' \"$vm_uid\"; "
+                       "[ \"$vm_uid\" = 0 ] || exit 1; exec /bin/bash --noprofile --norc -i")
+        # Literal backslash-n escapes keep the typed command on one line, so
+        # echoed input cannot impersonate the standalone password prompt. Never
+        # use a generic '#' match: sudo's lecture itself contains '#1', '#2'...
+        self.serial.send("stty -echo && sudo -k -S -p $'\\n" + password_token
+                         + "\\n' -i -- /bin/bash -c " + shlex.quote(root_script) + "\n")
+        password_pattern = r"(?:^|\n)" + password_token + r"\n"
+        root_pattern = r"(?:^|\n)" + root_token + r"[0-9]+\n"
+        _, response = self.serial.expect(password_pattern + "|" + root_pattern, 90)
+        require(password_token in response, "sudo did not request the ordinary user's password.")
+        self.serial.send(password + "\n")
+        _, response = self.serial.expect(root_pattern + "|" + password_pattern, 90)
+        require(root_token in response, "sudo rejected the ordinary user's password.")
+        require(response.strip() == root_token + "0", "The authenticated sudo shell does not have UID 0.")
+        self.serial.expect(r"(?:^|\n)__VM_ROOT_READY__ ?", 30)
         self.ready = True
+        log("Serial login and normal sudo password authentication passed; root shell UID 0 verified.")
 
     def run(self, text, name, timeout=120, check=True, budget=True):
         self.counter += 1
