@@ -11,6 +11,11 @@ on:
         description: Exact ISO artifact name from the compose job
         required: true
         type: string
+      scenario:
+        description: One partition scenario, or all release scenarios
+        required: false
+        default: all
+        type: string
   workflow_dispatch:
     inputs:
       iso-run-id:
@@ -21,32 +26,67 @@ on:
         description: Exact ISO artifact name from that run
         required: true
         type: string
+      scenario:
+        description: Partition scenario to verify
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - uefi-small
+          - uefi-btrfs
+          - bios-ext4
+          - bios-mbr-ext4
+          - uefi-xfs-home-swap
+          - uefi-preserve
 
 permissions:
   contents: read
   actions: read
 
 jobs:
+  matrix:
+    name: Select partition scenarios
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      scenarios: ${{ steps.select.outputs.scenarios }}
+    steps:
+      - name: Validate requested scenarios
+        id: select
+        env:
+          REQUESTED_SCENARIO: ${{ inputs.scenario }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          scenarios = ['uefi-btrfs', 'bios-ext4', 'bios-mbr-ext4',
+                       'uefi-xfs-home-swap', 'uefi-preserve', 'uefi-small']
+          requested = os.environ['REQUESTED_SCENARIO']
+          if requested not in ['all', *scenarios]:
+              raise SystemExit('Unknown partition scenario: ' + requested)
+          selected = scenarios if requested == 'all' else [requested]
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('scenarios=' + json.dumps(selected) + '\n')
+          PY
+
   install:
     name: ${{ matrix.scenario }} installation with SELinux Enforcing
+    needs: matrix
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
       fail-fast: false
       max-parallel: 6
       matrix:
-        scenario:
-          - uefi-btrfs
-          - bios-ext4
-          - bios-mbr-ext4
-          - uefi-xfs-home-swap
-          - uefi-preserve
-          - uefi-small
+        scenario: ${{ fromJSON(needs.matrix.outputs.scenarios) }}
     steps:
       - name: Check out the test controller
         uses: actions/checkout@v4
         with:
           persist-credentials: false
+
+      - name: Verify the controller with a real sudo shell
+        run: python3 scripts/vm-shell-smoke.py
 
       - name: Install the VM host tools
         shell: bash
@@ -107,6 +147,8 @@ jobs:
 
       - name: Boot, install, configure, and boot the installed disk
         shell: bash
+        env:
+          TEST_SCENARIO: ${{ matrix.scenario }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -116,7 +158,7 @@ jobs:
             --iso "${images[0]}" \
             --work-dir "$RUNNER_TEMP/fedora-dde-install-vm" \
             --output-dir artifacts/vm/test --timeout 5400 \
-            --scenario '${{ matrix.scenario }}' \
+            --scenario "$TEST_SCENARIO" \
             2>&1 | tee artifacts/vm/controller.log
 
       - name: Upload installation evidence

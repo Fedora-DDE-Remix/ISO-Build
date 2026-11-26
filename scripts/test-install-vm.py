@@ -271,6 +271,23 @@ class Serial:
         self.socket.close()
 
 
+def root_shell_script(root_token):
+    require(re.fullmatch(r"[A-Za-z0-9_]+", root_token), "Invalid root shell marker.")
+    return ("stty -echo; export PS1='__VM_ROOT_READY__ '; export HISTFILE=/dev/null; "
+            "set +o history; vm_uid=$(/usr/bin/id -u); "
+            f"printf '\\n{root_token}%s\\n' \"$vm_uid\"; "
+            "[ \"$vm_uid\" = 0 ] || exit 1; exec /bin/bash --noprofile --norc -i")
+
+
+def sudo_shell_command(password_token, root_token, *, non_interactive=False):
+    require(re.fullmatch(r"[A-Za-z0-9_]+", password_token), "Invalid sudo password marker.")
+    options = ["sudo", "-H", "-k", "-n" if non_interactive else "-S"]
+    # Execute Bash directly. sudo -i would add a second login-shell parsing
+    # layer around the already quoted Bash script and expand its variables.
+    return ("stty -echo && " + shlex.join(options) + " -p $'\\n" + password_token + "\\n' -- "
+            + shlex.join(["/bin/bash", "--noprofile", "--norc", "-c", root_shell_script(root_token)]))
+
+
 class Guest:
     def __init__(self, serial, report, output):
         self.serial = serial
@@ -290,15 +307,10 @@ class Guest:
         token = uuid.uuid4().hex[:12]
         password_token = "__VM_SUDO_PASSWORD_" + token + "__"
         root_token = "__VM_ROOT_UID_" + token + "__"
-        root_script = ("stty -echo; export PS1='__VM_ROOT_READY__ '; export HISTFILE=/dev/null; "
-                       "set +o history; vm_uid=$(/usr/bin/id -u); "
-                       f"printf '\\n{root_token}%s\\n' \"$vm_uid\"; "
-                       "[ \"$vm_uid\" = 0 ] || exit 1; exec /bin/bash --noprofile --norc -i")
         # Literal backslash-n escapes keep the typed command on one line, so
         # echoed input cannot impersonate the standalone password prompt. Never
         # use a generic '#' match: sudo's lecture itself contains '#1', '#2'...
-        self.serial.send("stty -echo && sudo -k -S -p $'\\n" + password_token
-                         + "\\n' -i -- /bin/bash -c " + shlex.quote(root_script) + "\n")
+        self.serial.send(sudo_shell_command(password_token, root_token) + "\n")
         password_pattern = r"(?:^|\n)" + password_token + r"\n"
         root_pattern = r"(?:^|\n)" + root_token + r"[0-9]+\n"
         _, response = self.serial.expect(password_pattern + "|" + root_pattern, 90)

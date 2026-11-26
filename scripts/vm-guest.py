@@ -97,6 +97,23 @@ def mount_info(path):
     return data["filesystems"][0]
 
 
+def installed_boot_mounts(installation, uefi):
+    """Check first-boot mounts against the backend's finalized UUID records."""
+    expected = installation.get("mounts", [])
+    result = {}
+    for point, filesystem in (("/boot", "ext4"),) + ((("/boot/efi", "vfat"),) if uefi else ()):
+        matches = [item for item in expected if item.get("mountpoint") == point]
+        require(len(matches) == 1 and matches[0].get("fstype") == filesystem
+                and re.fullmatch(r"[A-Fa-f0-9-]+", matches[0].get("uuid", "")),
+                f"The finalized installation has no unique {filesystem} UUID record for {point}.")
+        actual = mount_info(point)
+        require(actual.get("target") == point and actual.get("fstype") == filesystem
+                and actual.get("uuid") == matches[0]["uuid"],
+                f"The installed {point} mount does not match its finalized filesystem type and UUID.")
+        result[point] = actual
+    return result
+
+
 def policy_check():
     require(run(["getenforce"]).stdout.strip() == "Enforcing", "SELinux is not Enforcing.")
     require(Path("/sys/fs/selinux/enforce").read_text().strip() == "1", "SELinux kernel enforcement is off.")
@@ -168,6 +185,7 @@ def baseline(phase, expected_uuid=""):
         require(expected_uuid and root.get("uuid") == expected_uuid, "The disk boot has the wrong root UUID.")
         wanted_fs = "ext4" if scenario.startswith("bios-") else "xfs" if scenario == "uefi-xfs-home-swap" else "btrfs"
         require(root["fstype"] == wanted_fs and "rw" in root["options"].split(","), "Installed root filesystem is wrong or not writable.")
+        result["boot_filesystems"] = installed_boot_mounts(test.get("installation", {}), uefi)
         home = mount_info("/home")
         if wanted_fs == "btrfs":
             require(root["fsroot"] == "/root" and "compress=zstd:1" in root["options"].split(","),
@@ -180,7 +198,7 @@ def baseline(phase, expected_uuid=""):
             require(home["target"] == "/home" and home["fstype"] == "ext4" and home.get("uuid") != expected_uuid,
                     "The separate ext4 home filesystem was not mounted.")
         if scenario == "uefi-xfs-home-swap":
-            active_swap = run(["swapon", "--noheadings", "--raw", "--output", "NAME"]).stdout.splitlines()
+            active_swap = run(["swapon", "--show=NAME", "--noheadings", "--raw"]).stdout.splitlines()
             swap_uuids = [run(["blkid", "-s", "UUID", "-o", "value", p], check=False).stdout.strip() for p in active_swap]
             require(test.get("installation", {}).get("swap_uuid") in swap_uuids, "The installed disk swap is not active.")
             result["active_swap"] = active_swap
