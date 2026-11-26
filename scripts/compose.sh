@@ -5,6 +5,9 @@ umask 022
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C.UTF-8
 unset ANACONDA_ROOT_PATH
+source /workspace/config/build.env
+[[ $CONFIG_VERSION =~ ^45\.[0-9]{8}$ ]]
+iso_name=Fedora-DDE-Remix-$CONFIG_VERSION-x86_64.iso
 
 die() { printf 'compose: %s\n' "$*" >&2; exit 1; }
 [[ $EUID -eq 0 && $# -eq 0 ]] || die 'Run as root without arguments.'
@@ -17,9 +20,10 @@ done
 [[ -f /workspace/kickstarts/fedora-dde-live.ks ]] || die 'Kickstart is missing.'
 [[ -f /workspace/scripts/check-pam.py ]] || die 'PAM smoke check is missing.'
 [[ -f /workspace/scripts/check-comps.py ]] || die 'Desktop group completeness check is missing.'
+[[ -f /workspace/scripts/check-selinux.py ]] || die 'SELinux policy and labeling check is missing.'
 [[ -s /work/build-info.json && ! -L /work/build-info.json ]] || die 'The build provenance JSON is missing.'
 [[ ! -e /work/compose-result ]] || die '/work/compose-result already exists; use a fresh compose workspace.'
-[[ ! -e /output/Fedora-DDE-Remix-45-x86_64.iso ]] || die 'The output ISO already exists.'
+[[ ! -e /output/$iso_name ]] || die 'The output ISO already exists.'
 
 shopt -s nullglob
 rpms=(/work/rpms/*.rpm)
@@ -50,8 +54,8 @@ python3 - /output/logs /work/compose-tmp /tmp livemedia-creator \
     --releasever 45 --project 'Fedora DDE Remix' \
     --volid Fedora-DDE-45-x86_64 \
     --rootfs-type squashfs --nomacboot \
-    --extra-boot-args 'selinux=0' \
-    --iso-only --iso-name Fedora-DDE-Remix-45-x86_64.iso \
+    --extra-boot-args 'selinux=1 enforcing=1' \
+    --iso-only --iso-name "$iso_name" \
     --tmp /work/compose-tmp --resultdir /work/compose-result \
     --logfile /output/logs/lmc.log <<'PY'
 from pathlib import Path
@@ -215,13 +219,13 @@ finally:
 sys.exit(status)
 PY
 
-iso=/work/compose-result/Fedora-DDE-Remix-45-x86_64.iso
+iso=/work/compose-result/$iso_name
 [[ -s $iso ]] || die 'LMC did not produce the expected ISO.'
 /usr/bin/bash /workspace/scripts/check-image.sh "$iso" /output/rpm-manifest.txt /output/logs
-install -m 0644 "$iso" /output/Fedora-DDE-Remix-45-x86_64.iso
+install -m 0644 "$iso" "/output/$iso_name"
 (
     cd /output
-    sha256sum Fedora-DDE-Remix-45-x86_64.iso | tee CHECKSUM
+    sha256sum "$iso_name" | tee CHECKSUM
 )
-stat --printf='ISO size: %s bytes\n' /output/Fedora-DDE-Remix-45-x86_64.iso
-printf 'Verified ISO: %s\n' /output/Fedora-DDE-Remix-45-x86_64.iso
+stat --printf='ISO size: %s bytes\n' "/output/$iso_name"
+printf 'Verified ISO: %s\n' "/output/$iso_name"

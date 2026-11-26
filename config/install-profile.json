@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "selinux": "disabled",
-  "pam": "ddm-system-login"
+  "selinux": "enforcing",
+  "pam": "fedora"
 }
 

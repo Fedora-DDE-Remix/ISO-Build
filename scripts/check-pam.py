@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import pwd
+import re
 import secrets
 import shutil
 import signal
@@ -26,7 +27,7 @@ import sys
 
 MARKER = Path("/root/.fedora-dde-iso-build")
 PROFILE = Path("/etc/fedora-dde-installer/install-profile.json")
-EXPECTED_PROFILE = {"schema": 1, "selinux": "disabled", "pam": "ddm-system-login"}
+EXPECTED_PROFILE = {"schema": 1, "selinux": "enforcing", "pam": "fedora"}
 LOGIN = "fdd_iso_pam_check"
 UNKNOWN_LOGIN = "fdd_iso_pam_unknown"
 TEST_HOME = "/nonexistent/fedora-dde-iso-pam-check"
@@ -135,6 +136,59 @@ def unique_json_keys(pairs):
     return value
 
 
+def verify_fedora_pam(text, service):
+    """Check the maintained Fedora stack without opening a PAM session.
+
+    Ignore comments, but parse bracketed PAM controls as a single field.  The
+    checks are deliberately separate from the authentication test: successful
+    password authentication alone cannot prove the session's SELinux ordering.
+    """
+    if service not in {"ddm", "ddm-autologin"}:
+        raise CheckError("unexpected DDM PAM service")
+    rules = []
+    pattern = re.compile(
+        r"(-?(?:auth|account|password|session))\s+"
+        r"(\[[^\]]+\]|\S+)\s+(\S+)(?:\s+(.*))?"
+    )
+    for number, line in enumerate(text.splitlines(), 1):
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        match = pattern.fullmatch(line)
+        if match is None:
+            raise CheckError(f"unsupported PAM rule in {service} at line {number}")
+        kind, control, module, arguments = match.groups()
+        if control in {"include", "substack"} and (
+                module == "system-login" or module.startswith("common-")
+                or "/" in module):
+            raise CheckError(f"non-Fedora PAM include in {service}")
+        rules.append((number, kind, control, module, tuple((arguments or "").split())))
+
+    def one(kind, control, module, arguments=()):
+        matches = [number for number, actual_kind, actual_control, actual_module, args
+                   in rules if (actual_kind, actual_control, actual_module, args)
+                   == (kind, control, module, arguments)]
+        if len(matches) != 1:
+            raise CheckError(f"{service} requires exactly one {kind} {control} {module} rule")
+        return matches[0]
+
+    stack = "password-auth" if service == "ddm" else "system-auth"
+    if service == "ddm":
+        one("auth", "substack", stack)
+    one("auth", "include", "postlogin")
+    one("account", "required", "pam_nologin.so")
+    one("account", "include", stack)
+    one("password", "include", stack)
+    session_stack = one("session", "include", stack)
+    session_postlogin = one("session", "include", "postlogin")
+    close = one("session", "required", "pam_selinux.so", ("close",))
+    loginuid = one("session", "required", "pam_loginuid.so")
+    opened = one("session", "required", "pam_selinux.so", ("open",))
+    namespace = one("session", "required", "pam_namespace.so")
+    if not close < loginuid < opened < namespace < session_stack < session_postlogin:
+        raise CheckError(f"incorrect SELinux/loginuid/session ordering in {service}")
+
+
 def check_context():
     if len(sys.argv) != 1:
         raise CheckError("this build-only check accepts no arguments")
@@ -146,9 +200,10 @@ def check_context():
     if (not isinstance(profile, dict) or type(profile.get("schema")) is not int
             or profile != EXPECTED_PROFILE):
         raise CheckError("the target does not have the expected ISO install profile")
-    for path in (Path("/etc/pam.d/ddm"), Path("/etc/pam.d/system-login")):
-        if not trusted_read(path, 65536).strip():
-            raise CheckError(f"empty PAM service: {path}")
+    for service in ("ddm", "ddm-autologin"):
+        path = Path("/etc/pam.d") / service
+        verify_fedora_pam(trusted_read(path, 65536).decode("utf-8"), service)
+        print(f"PASS {service}: native Fedora PAM and SELinux session ordering", flush=True)
     failure_dirs = failure_directories()
     for name in (LOGIN, UNKNOWN_LOGIN):
         require_absent_user(name)

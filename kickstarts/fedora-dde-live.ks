@@ -6,7 +6,7 @@ keyboard us
 timezone Etc/UTC --utc
 network --bootproto=dhcp --device=link --activate
 rootpw --lock
-selinux --disabled
+selinux --enforcing
 firewall --enabled --service=mdns
 bootloader --location=none
 part / --size=24576 --fstype=ext4
@@ -43,6 +43,7 @@ grub2-efi-x64-cdboot
 shim-x64
 efibootmgr
 policycoreutils
+libselinux-utils
 selinux-policy-targeted
 zram-generator-defaults
 systemd-udev
@@ -98,6 +99,7 @@ install -m 0644 /work/build-info.json /mnt/sysimage/usr/share/fedora-dde-remix/b
 install -m 0700 /workspace/scripts/configure-live.sh /mnt/sysimage/root/configure-live.sh
 install -m 0700 /workspace/scripts/check-pam.py /mnt/sysimage/root/check-pam.py
 install -m 0700 /workspace/scripts/check-comps.py /mnt/sysimage/root/check-comps.py
+install -m 0700 /workspace/scripts/check-selinux.py /mnt/sysimage/root/check-selinux.py
 install -d -m 0700 /mnt/sysimage/root/compose-rpms
 shopt -s nullglob
 rpms=(/work/rpms/*.rpm)
@@ -132,7 +134,7 @@ cleanup() {
     trap - EXIT
     set +e
     restore_resolver || status=1
-    rm -f /root/.fedora-dde-iso-build /root/check-pam.py /root/check-comps.py /root/configure-live.sh
+    rm -f /root/.fedora-dde-iso-build /root/check-pam.py /root/check-comps.py /root/check-selinux.py /root/configure-live.sh
     rm -rf /root/compose-rpms /root/compose-comps
     # Leave the %post log intact on both successful and failed installs.
     exit "$status"
@@ -175,4 +177,8 @@ if grep -q '^liveuser:' /mnt/sysimage/etc/passwd; then
     echo 'Refusing to publish an image with a baked-in Live account.' >&2
     exit 1
 fi
+# Label after all final writes with the image's compiled Fedora/DDE policy.
+# Lorax also runs setfiles, but does not propagate its return code. This gate
+# makes a labeling failure fatal and checks actual security.selinux xattrs.
+python3 /workspace/scripts/check-selinux.py label /mnt/sysimage
 %end

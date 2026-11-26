@@ -4,9 +4,11 @@
 `Fedora-DDE-Remix/fedora-dde-installer`，在当前 Live 会话内完成安装、用户、
 密码、时区和键盘配置，由用户决定何时重启。
 
-**本版按要求关闭 SELinux**：Live 启动和安装后的内核参数均包含 `selinux=0`，
-系统配置为 `SELINUX=disabled`。安装器通过本仓库明确提供的 profile 选择此行为；
-没有该 profile 的其他镜像仍使用安装器原有的 enforcing 检查。
+**45.20261126 版恢复 SELinux Enforcing**：Live 和安装目标使用 Fedora 原生 PAM，
+系统配置为 `SELINUX=enforcing`。Live 启动参数显式包含 `selinux=1 enforcing=1`；
+安装器为目标系统生成正常磁盘引导参数，使用 Fedora 默认的 Enforcing 行为。
+镜像使用维护者发布的 DDM 和 DDE SELinux 策略包，构建时验证策略注册和文件标签。
+正式交付还需要通过下面的实际虚拟机安装检查；仅生成 ISO 不代表安装验证通过。
 
 ## 桌面软件来源
 
@@ -20,12 +22,10 @@ sudo dnf group install dde-desktop
 
 DNF 5 的 `group install` 对应桌面组安装操作。comps RPM 先安装本地组元数据，
 下一次 DNF 运行才能解析 `dde-desktop` 组。配方保留这个顺序，不维护第二份桌面包清单。
-预检优先执行普通仓库的 `dnf install dde-desktop-comps`。如果仓库索引暂时找不到
-这个包，本版只对 comps 使用已成功的 COPR 构建 **11377888**，版本固定为
-`6.2.1-1.fc45.noarch`。下载后校验项目公钥、RPM 签名和版本，记录实际 SHA-256；
-镜像内先安装同一份已验证的 comps RPM，再单独安装桌面组。桌面其他依赖继续使用
-原 COPR。回退下载遵循 `copr-cli download-build` 对手动发布项目的处理方式，
-从 `-devel` 分发获取这一个精确 RPM；不启用或写入 devel 仓库配置。
+预检从正式 COPR 仓库刷新并安装 `dde-desktop-comps`，要求版本不低于
+`6.2.1-5.fc45`。下载后校验固定项目公钥、RPM 签名和版本，记录实际 SHA-256；
+镜像内先安装同一份已验证的 comps RPM，再单独安装桌面组。正式仓库缺包或
+校验失败会阻止构建，不再回退到旧版 comps 或 `-devel` 分发。
 
 产物的 `comps-input.json` 和 `build-info.json` 记录实际选择的来源、版本及校验值。
 安装后直接读取该 RPM 的 comps 元数据，逐一检查 `dde-desktop` 的 mandatory 包已安装；
@@ -45,12 +45,10 @@ DNF 即使跳过缺失的组包并返回成功，也不能绕过这项检查。
 Live 用户只在带 `rd.live.image` 的启动过程中创建，位于临时可写层，原始只读
 payload 不包含这个账户。安装目标使用安装器创建的新账户。
 
-维护者的 DDM `0.5.0-5` 普通登录引用 `system-login`；本仓库自己的
-`fedora-dde-remix-config` RPM 提供这个入口，并接入 Fedora 的
-`password-auth` / `postlogin`。DDM 自己拥有的 `ddm` 和 `ddm-autologin`
-PAM 文件保持原样。该版本自动登录文件使用 Fedora PAM 不接受的 `@include`
-语法，因此本版不启用自动登录。构建时用实际 PAM 库检查正确密码、错误密码、
-未知账户和过期账户；图形会话还需通过启动验证。
+维护者的 DDM `0.5.0-8` 已提供 Fedora 原生 `password-auth` / `postlogin`
+配置及 SELinux 会话处理，本仓库不再提供 `/etc/pam.d/system-login` 兼容文件。
+构建时核对实际 RPM 中的 PAM 配置，并用实际 PAM 库检查正确密码、错误密码、
+未知账户和过期账户。虚拟机检查还必须验证真实的 DDM 登录和桌面会话。
 
 ## 构建与产物
 
@@ -59,9 +57,40 @@ PAM 文件保持原样。该版本自动登录文件使用 Fedora PAM 不接受�
 `livemedia-creator --make-iso --no-virt` 构建 BIOS / UEFI hybrid ISO。
 Anaconda 采用目录安装到新创建的临时文件系统镜像，配方不指定物理安装磁盘。
 
-产物包含 ISO、SHA-256 校验文件、包清单、输入提交和构建日志。ISO artifact
-保留 14 天；构建失败会保留已生成的日志及 RPM。实际产物以 Actions 状态为准，
-提交配方或生成 RPM 不等于 ISO 已经构建成功。
+产物包含带日期版本的 ISO、SHA-256 校验文件、包清单、输入提交和构建日志。
+ISO 与安装验证证据保留 90 天，构建日志及 RPM 保留 30 天。
+实际产物以 Actions 状态为准，提交配方或生成 RPM 不等于 ISO 已经构建成功。
+
+### 虚拟机安装验证
+
+compose 成功后自动调用 **Test ISO installation**。测试下载同一份 ISO 并校验
+SHA-256，使用 OVMF UEFI 或 SeaBIOS、独立 sparse qcow2、QEMU 的本地 UNIX 控制接口。
+运行前探测 KVM，报告实际使用的加速方式；测试不会传入宿主物理磁盘。
+
+1. 从 ISO 自带 GRUB 启动，只在该次启动中追加串口控制台参数。
+2. 正常登录 Live，检查 Enforcing 和真实 DDM 桌面会话。
+3. 调用 ISO 内安装器的完整后端流程，实际分区、复制、配置用户、部署引导并完成安装。
+4. 关机并移除 ISO，从同一个虚拟硬盘启动。
+5. 验证普通用户、wheel 权限、锁定的 root、Live 账户清理、可写根目录、Enforcing、
+   以及新用户经 DDM 登录后仍在运行的 Treeland / DDE Shell 会话。
+
+测试覆盖以下组合，所有场景都必须安装后移除 ISO 并从磁盘启动：
+
+| 场景 | 固件 | 文件系统与布局 | 虚拟磁盘 |
+| --- | --- | --- | --- |
+| `uefi-btrfs` | UEFI | 默认 Btrfs root/home 子卷、独立 `/boot`、ESP | 64 GiB |
+| `bios-ext4` | BIOS | ext4 根分区、独立 `/boot`、GPT BIOS boot 区 | 64 GiB |
+| `bios-mbr-ext4` | BIOS | MBR 分区表、ext4 根分区、独立 `/boot` | 64 GiB |
+| `uefi-xfs-home-swap` | UEFI | XFS 根分区、独立 `/home`、磁盘 swap、`/boot`、ESP | 64 GiB |
+| `uefi-preserve` | UEFI | 保留已有分区及验证文件，在剩余空间安装 | 64 GiB |
+| `uefi-small` | UEFI | 默认 Btrfs 布局的小容量完整安装 | 16 GB（十进制） |
+
+测试保存阶段日志、截图、ISO 校验值和 JSON 报告；失败仍上传诊断。
+测试账户只在这次虚拟机安装中创建，不写入正式 ISO。自动检查的范围以实际
+完成的报告为准；实体硬件、Secure Boot、多磁盘与加密安装不在这组测试范围内。
+
+如需对同一镜像重试，在 **Test ISO installation → Run workflow** 填入构建
+run ID 和完整 ISO artifact 名称。控制器改动不会自动触发重新 compose。
 
 `config/build.env` 固定安装器提交。工作流优先复用该提交已经通过完整构建和测试的
 安装器 CI artifact，同时核对源提交和固定 ZIP SHA-256；这项只读下载不把 GitHub

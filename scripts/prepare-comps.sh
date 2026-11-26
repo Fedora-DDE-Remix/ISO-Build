@@ -26,9 +26,10 @@ trap 'rm -rf -- "$verify_dir"' EXIT
 key_url=https://download.copr.fedorainfracloud.org/results/mozixun/Fedora-DDE-Remix/pubkey.gpg
 key_sha256=eb44eeabc2a5546db7b72d9f5adc6d9c17f7a4b7456e579e3dc0d964e2455200
 key_fingerprint=1E6DCAB9CD7C35C002E28E9737CFB2A4FF3592C8
-fallback_nevra=dde-desktop-comps-6.2.1-1.fc45.noarch
-fallback_sha256=873ffa2b6d4d346bfe938eee6c0d3aaf55e09269d75e790179f419699dfffe4e
-fallback_url=https://download.copr.fedorainfracloud.org/results/mozixun/Fedora-DDE-Remix/fedora-45-x86_64-devel/11377888-dde-desktop-comps/dde-desktop-comps-6.2.1-1.fc45.noarch.rpm
+repository_id=copr:copr.fedorainfracloud.org:mozixun:Fedora-DDE-Remix
+repository_url=https://download.copr.fedorainfracloud.org/results/mozixun/Fedora-DDE-Remix/fedora-45-x86_64/
+minimum_evr=0:6.2.1-5.fc45
+mode=repository
 nevra_format='%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n'
 
 download_https() {
@@ -39,38 +40,21 @@ download_https() {
         --output "$2" "$1"
 }
 
-# Prefer the normal enabled repository. A successful transaction is pinned to
-# its installed epoch/version, rather than resolving the package name again.
-source_url=
-if dnf -y --refresh install dde-desktop-comps; then
-    mode=repository
-    nevra=$(rpm -q --qf "$nevra_format" dde-desktop-comps)
-    epoch=$(rpm -q --qf '%{EPOCHNUM}\n' dde-desktop-comps)
-    [[ $nevra =~ ^dde-desktop-comps-[[:alnum:]_.+~^]+-[[:alnum:]_.+~^]+\.(noarch|x86_64)$ && $epoch =~ ^[0-9]+$ ]] ||
-        die 'Cannot identify a single installed comps package.'
-    dnf download --destdir "$bootstrap" "dde-desktop-comps-${epoch}:${nevra#dde-desktop-comps-}"
-else
-    mode=copr-build-fallback
-    nevra=$fallback_nevra
-    epoch=0
-    source_url=$fallback_url
-    printf 'Using the signed RPM from completed COPR build 11377888.\n'
-    # Match copr-cli download-build: in manual-publication projects the
-    # signed, completed build is served through the -devel distribution.
-    # This downloads one RPM only; it never enables a developer repository.
-    if ! download_https "$source_url" "$bootstrap/$nevra.rpm"; then
-        die 'The signed comps RPM is not downloadable; the COPR maintainer must publish or repair the completed build before ISO composition can continue.'
-    fi
+# Resolve only the normal production COPR repository, with fresh metadata.
+# Download before installing so that the isolated project-key check below
+# applies to the first installation as well as to the later image transaction.
+if ! dnf --refresh --repo="$repository_id" \
+    --setopt="$repository_id.baseurl=$repository_url" \
+    --setopt="$repository_id.skip_if_unavailable=False" \
+    download --destdir "$bootstrap" dde-desktop-comps; then
+    die 'The production COPR repository must provide the current comps RPM before a release ISO can be composed.'
 fi
 
 shopt -s nullglob
 rpms=("$bootstrap"/*.rpm)
 (( ${#rpms[@]} == 1 )) || die 'Expected exactly one comps RPM.'
 rpm_file=${rpms[0]}
-[[ -s $rpm_file && ! -L $rpm_file ]] || die 'The downloaded RPM is not a regular nonempty file.'
-if [[ $mode == copr-build-fallback ]]; then
-    printf '%s  %s\n' "$fallback_sha256" "$rpm_file" | sha256sum --check --strict
-fi
+[[ -f $rpm_file && -s $rpm_file && ! -L $rpm_file ]] || die 'The downloaded RPM is not a regular nonempty file.'
 
 download_https "$key_url" "$bootstrap/pubkey.gpg"
 printf '%s  %s\n' "$key_sha256" "$bootstrap/pubkey.gpg" | sha256sum --check --strict
@@ -92,8 +76,20 @@ cat "$verify_dir/signature.log"
 grep -Eiq 'signature.*: OK$' "$verify_dir/signature.log" || die 'No valid cryptographic RPM signature was reported.'
 
 [[ $(rpm "${verify_options[@]}" -qp --qf '%{NAME}\n' "$rpm_file") == dde-desktop-comps ]] || die 'Unexpected RPM name.'
-[[ $(rpm "${verify_options[@]}" -qp --qf "$nevra_format" "$rpm_file") == "$nevra" ]] || die 'Downloaded RPM NEVRA mismatch.'
-[[ $(rpm "${verify_options[@]}" -qp --qf '%{EPOCHNUM}\n' "$rpm_file") == "$epoch" ]] || die 'Downloaded RPM epoch mismatch.'
+[[ $(rpm "${verify_options[@]}" -qp --qf '%{ARCH}\n' "$rpm_file") == noarch ]] || die 'Unexpected comps RPM architecture.'
+nevra=$(rpm "${verify_options[@]}" -qp --qf "$nevra_format" "$rpm_file")
+epoch=$(rpm "${verify_options[@]}" -qp --qf '%{EPOCHNUM}\n' "$rpm_file")
+version=$(rpm "${verify_options[@]}" -qp --qf '%{VERSION}\n' "$rpm_file")
+release=$(rpm "${verify_options[@]}" -qp --qf '%{RELEASE}\n' "$rpm_file")
+[[ $version =~ ^[[:alnum:]_.+~^]+$ && $release =~ ^[[:alnum:]_.+~^]+$ && $epoch =~ ^[0-9]+$ ]] ||
+    die 'Invalid comps RPM version metadata.'
+[[ $nevra == "dde-desktop-comps-$version-$release.noarch" && $release =~ (^|[.])fc45([.]|$) ]] ||
+    die 'The comps RPM does not target Fedora 45.'
+# RPM's comparator handles epoch, tilde and caret correctly. The strict
+# metadata grammar above also makes the interpolated Lua strings safe.
+comparison=$(rpm --eval "%{lua:print(rpm.vercmp('${epoch}:${version}-${release}', '$minimum_evr'))}")
+[[ $comparison == 0 || $comparison == 1 ]] ||
+    die "Production comps is older than the required $minimum_evr; refresh or publish the current package."
 
 # DNF's local-package check is an additional check after the isolated one.
 rpmkeys --import "$bootstrap/pubkey.gpg"
@@ -108,13 +104,15 @@ rpm_filename=${rpm_file##*/}
     cd "$bootstrap"
     sha256sum pubkey.gpg "$rpm_filename" > SHA256SUMS
 )
-python3 - "$mode" "$nevra" "$epoch" "$rpm_sha256" "$source_url" \
-    "$key_fingerprint" "$key_sha256" "$rpm_filename" "$key_url" <<'PY'
+python3 - "$mode" "$nevra" "$epoch" "$rpm_sha256" "$repository_id" \
+    "$repository_url" "$minimum_evr" "$key_fingerprint" "$key_sha256" \
+    "$rpm_filename" "$key_url" <<'PY'
 import json
 from pathlib import Path
 import sys
 
-mode, nevra, epoch, digest, source_url, fingerprint, key_digest, filename, key_url = sys.argv[1:]
+(mode, nevra, epoch, digest, repository_id, repository_url, minimum_evr,
+ fingerprint, key_digest, filename, key_url) = sys.argv[1:]
 directory = Path('/work/comps-bootstrap')
 expected = {filename, 'pubkey.gpg', 'SHA256SUMS'}
 assert {p.name for p in directory.iterdir()} == expected, 'Unexpected bootstrap files'
@@ -126,8 +124,11 @@ data = {
     'epoch': int(epoch),
     'sha256': digest,
     'rpm_filename': filename,
-    'source_url': source_url or None,
-    'requested_copr_build_id': 11377888 if mode == 'copr-build-fallback' else None,
+    'source_url': None,
+    'requested_copr_build_id': None,
+    'repository_id': repository_id,
+    'repository_url': repository_url,
+    'minimum_evr': minimum_evr,
     'key_url': key_url,
     'key_fingerprint': fingerprint,
     'key_sha256': key_digest,

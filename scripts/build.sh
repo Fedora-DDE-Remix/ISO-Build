@@ -18,9 +18,8 @@ mkdir -p /work/rpms /output/logs /output/rpms
 dnf -y install dnf5-plugins /usr/bin/curl python3
 dnf -y copr enable mozixun/Fedora-DDE-Remix
 
-# Prefer the normal repository. When its metadata has not caught up, consume
-# only the signed, completed comps build; keep all desktop packages on the
-# normal repository. Reuse these exact verified RPM bytes inside the image.
+# Use the maintainer's published repository and reuse the exact verified
+# comps RPM bytes inside the image before installing its desktop group.
 bash /workspace/scripts/prepare-comps.sh
 install -m644 /work/comps-input.json /output/comps-input.json
 cp -a /work/comps-bootstrap/*.rpm /output/rpms/
@@ -34,7 +33,7 @@ dnf -y install git rpm-build \
 actual_ref=$(git -c safe.directory=/installer -C /installer rev-parse HEAD)
 [[ $actual_ref == "$INSTALLER_REF" ]]
 iso_ref=$(git -c safe.directory=/workspace -C /workspace rev-parse HEAD)
-export INSTALLER_REF FEDORA_RELEASE TARGET_ARCH iso_ref
+export INSTALLER_REF FEDORA_RELEASE TARGET_ARCH CONFIG_VERSION iso_ref
 
 # The workflow checks the pinned archive digest and Actions run before making
 # this directory available read-only. No credentials enter this container.
@@ -194,7 +193,9 @@ data = {
     'installer_commit': os.environ['INSTALLER_REF'],
     'fedora_release': os.environ['FEDORA_RELEASE'],
     'architecture': os.environ['TARGET_ARCH'],
-    'selinux': 'disabled',
+    'selinux': 'enforcing',
+    'pam': 'fedora',
+    'image_version': os.environ['CONFIG_VERSION'],
     'copr': 'mozixun/Fedora-DDE-Remix',
     'desktop_group': 'dde-desktop',
     'comps': json.loads(Path('/work/comps-input.json').read_text()),
@@ -210,7 +211,7 @@ config_top=/work/config-rpmbuild
 config_source=/work/config-sources/fedora-dde-remix-config-$CONFIG_VERSION
 mkdir -p "$config_top"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS} "$config_source"/{config,scripts}
 install -m644 /workspace/LICENSE /workspace/README.md "$config_source/"
-install -m644 /workspace/config/{install-profile.json,pam-system-login,fedora-dde-live.service} "$config_source/config/"
+install -m644 /workspace/config/{install-profile.json,fedora-dde-live.service} "$config_source/config/"
 install -m755 /workspace/scripts/configure-live.sh "$config_source/scripts/"
 tar -C /work/config-sources -czf "$config_top/SOURCES/fedora-dde-remix-config-$CONFIG_VERSION.tar.gz" \
     "fedora-dde-remix-config-$CONFIG_VERSION"

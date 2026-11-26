@@ -12,6 +12,8 @@ iso=$(realpath -- "$1")
 manifest=$(realpath -- "$2")
 report_dir=$(realpath -- "$3")
 build_info=$(realpath -- "$(dirname -- "$manifest")/build-info.json")
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+[[ $EUID -eq 0 ]] || die 'Root is required to extract and verify security.selinux xattrs.'
 [[ -s $iso && -s $manifest && -s $build_info && -d $report_dir ]] || die 'ISO, manifest, build information or report directory is missing.'
 temporary=$(mktemp -d /work/check-image.XXXXXXXX)
 trap 'rm -rf -- "$temporary"' EXIT
@@ -40,7 +42,9 @@ for filename in sys.argv[1:]:
                if re.match(r'^\s*linux(?:efi|16)?\s+', line)]
     assert entries, f'No Linux boot entries in {filename}'
     for entry in entries:
-        assert 'selinux=0' in entry, f'SELinux is not disabled in {filename}'
+        assert 'selinux=1' in entry and 'enforcing=1' in entry, f'Missing explicit SELinux Enforcing arguments in {filename}'
+        assert not any(arg.startswith(('selinux=', 'enforcing=')) and arg not in ('selinux=1', 'enforcing=1')
+                       for arg in entry), f'Conflicting SELinux arguments in {filename}'
         assert 'rd.live.image' in entry, f'Not a Fedora Live boot entry in {filename}'
         assert any(arg.startswith('root=live:') for arg in entry), f'Missing Live image root in {filename}'
 PY
@@ -54,8 +58,11 @@ grep -Eq '/usr/lib/modules/[^/]+/vmlinuz$' "$report_dir/payload-files.txt" || di
 if grep -Eq '/home/liveuser(/|$)' "$report_dir/payload-files.txt"; then
     die 'The temporary Live home directory is baked into the payload.'
 fi
-# Only extract the small metadata/configuration subset needed for verification.
-unsquashfs -no-progress -d "$temporary/root" "$temporary/payload.img" \
+# Extract metadata plus the critical binaries whose actual SELinux xattrs must
+# survive the final SquashFS. Checking file_contexts alone would miss lost xattrs.
+label_paths=$(python3 "$script_dir/check-selinux.py" paths)
+mapfile -t selinux_paths <<< "$label_paths"
+unsquashfs -xattrs -no-progress -d "$temporary/root" "$temporary/payload.img" \
     etc/passwd etc/shadow etc/selinux/config \
     etc/fedora-dde-installer/install-profile.json \
     etc/kernel/install.d etc/dracut.conf.d \
@@ -65,7 +72,10 @@ unsquashfs -no-progress -d "$temporary/root" "$temporary/payload.img" \
     usr/share/fedora-dde-remix/rpm-manifest.txt \
     usr/share/fedora-dde-remix/build-info.json \
     usr/share/applications/fedora-dde-installer.desktop \
+    "${selinux_paths[@]}" \
     > "$report_dir/payload-extract.log"
+python3 "$script_dir/check-selinux.py" verify "$temporary/root" \
+    | tee "$report_dir/selinux-labels.txt"
 
 python3 - "$temporary/root" "$manifest" "$build_info" <<'PY'
 from pathlib import Path
@@ -85,9 +95,9 @@ for name in ('passwd', 'shadow'):
     assert not re.search(r'^liveuser:', content, re.M), 'Live account is present in the read-only payload'
     if name == 'shadow':
         assert all(line.split(':')[1] for line in content.splitlines() if line), 'An image account has an empty password'
-assert re.search(r'^SELINUX=disabled$', regular('etc/selinux/config').read_text(), re.M), 'SELinux config mismatch'
+assert re.search(r'^SELINUX=enforcing$', regular('etc/selinux/config').read_text(), re.M), 'SELinux config mismatch'
 profile = json.loads(regular('etc/fedora-dde-installer/install-profile.json').read_text())
-assert type(profile.get('schema')) is int and profile == {'schema': 1, 'selinux': 'disabled', 'pam': 'ddm-system-login'}, 'Installer profile mismatch'
+assert type(profile.get('schema')) is int and profile == {'schema': 1, 'selinux': 'enforcing', 'pam': 'fedora'}, 'Installer profile mismatch'
 service = regular('usr/lib/systemd/system/fedora-dde-live.service').read_text()
 assert 'ConditionKernelCommandLine=rd.live.image' in service, 'Live service has no kernel condition'
 assert 'ExecStart=/usr/libexec/fedora-dde-live boot' in service, 'Live service does not use the boot helper'
@@ -111,22 +121,25 @@ assert provenance == build_info.read_bytes(), 'The published build information d
 data = json.loads(provenance)
 expected = {'iso_repository': 'Fedora-DDE-Remix/ISO-Build',
             'installer_repository': 'Fedora-DDE-Remix/fedora-dde-installer',
-            'fedora_release': '45', 'architecture': 'x86_64', 'selinux': 'disabled',
+            'fedora_release': '45', 'architecture': 'x86_64', 'selinux': 'enforcing',
             'copr': 'mozixun/Fedora-DDE-Remix', 'desktop_group': 'dde-desktop', 'live_login': 'manual'}
 assert isinstance(data, dict) and all(data.get(k) == v for k, v in expected.items()), 'Unexpected build information'
 assert all(re.fullmatch(r'[0-9a-f]{40}', data.get(k, '')) for k in ('iso_commit', 'installer_commit')), 'Invalid source commit'
 names = {line.split('\t')[0] for line in included.decode().splitlines()}
 required = {'dde-desktop-comps', 'ddm', 'dde-session', 'dde-shell', 'treeland',
             'fedora-dde-installer', 'fedora-dde-remix-config', 'kernel-core',
-            'dracut-live', 'dracut-config-rescue', 'grub2-pc-modules', 'grub2-efi-x64-cdboot'}
+            'dracut-live', 'dracut-config-rescue', 'grub2-pc-modules', 'grub2-efi-x64-cdboot',
+            'ddm-selinux', 'dde-daemon-selinux', 'dde-api-selinux', 'deepin-system-monitor-selinux',
+            'selinux-policy-targeted', 'policycoreutils', 'libselinux-utils'}
 assert required <= names, f'Required RPMs missing: {sorted(required - names)}'
 assert 'systemd-homed' not in names, 'systemd-homed is not supported by this image'
 print(f'Payload verified: Fedora 45, {len(names)} package names, no baked-in Live account.')
 PY
 printf '%s\n' \
     'BIOS and UEFI hybrid ISO entries: present' \
-    'All ISO Linux boot entries: rd.live.image and selinux=0' \
+    'All ISO Linux boot entries: rd.live.image, selinux=1 and enforcing=1' \
     'Payload: direct read-only SquashFS with dmsquash-live initrd' \
+    'Actual payload SELinux xattrs: checked on core system and DDM files' \
     'Conventional kernel-install and rescue hooks: preserved' \
     'Temporary Live account and empty password entries: absent' \
     'Embedded and external RPM manifests: identical' \

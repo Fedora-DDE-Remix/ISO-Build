@@ -19,7 +19,7 @@ assert not p.is_symlink() and p.is_file(), 'Missing image installation profile'
 s = p.stat()
 assert s.st_uid == 0 and stat.S_IMODE(s.st_mode) == 0o644, 'Incorrect profile ownership/mode'
 profile = json.loads(p.read_text())
-assert type(profile.get('schema')) is int and profile == {'schema': 1, 'selinux': 'disabled', 'pam': 'ddm-system-login'}, 'Unexpected image profile'
+assert type(profile.get('schema')) is int and profile == {'schema': 1, 'selinux': 'enforcing', 'pam': 'fedora'}, 'Unexpected image profile'
 PY
 }
 
@@ -37,7 +37,7 @@ assert not p.is_symlink() and p.is_file(), 'Missing build provenance JSON'
 data = json.loads(p.read_text())
 expected = {'iso_repository': 'Fedora-DDE-Remix/ISO-Build',
             'installer_repository': 'Fedora-DDE-Remix/fedora-dde-installer',
-            'fedora_release': '45', 'architecture': 'x86_64', 'selinux': 'disabled',
+            'fedora_release': '45', 'architecture': 'x86_64', 'selinux': 'enforcing',
             'copr': 'mozixun/Fedora-DDE-Remix', 'desktop_group': 'dde-desktop', 'live_login': 'manual'}
 assert isinstance(data, dict) and all(data.get(k) == v for k, v in expected.items()), 'Unexpected build provenance'
 assert all(re.fullmatch(r'[0-9a-f]{40}', data.get(k, '')) for k in ('iso_commit', 'installer_commit')), 'Invalid source commit'
@@ -48,7 +48,7 @@ installed_comps = subprocess.check_output(
 assert comps.get('nevra') == installed_comps, 'Comps input differs from the installed RPM'
 assert re.fullmatch(r'[0-9a-f]{64}', comps.get('sha256', '')), 'Missing comps RPM digest'
 PY
-    [[ -s /etc/pam.d/system-login ]] || die 'The Fedora system-login compatibility stack is missing.'
+    [[ -s /etc/pam.d/ddm ]] || die 'The maintained Fedora DDM PAM stack is missing.'
     [[ -x /usr/libexec/fedora-dde-live ]] || die 'The packaged Live helper is missing.'
     [[ -f /usr/lib/systemd/system/fedora-dde-live.service ]] || die 'The Live service is missing.'
     [[ -x /usr/bin/fedora-dde-installer-launch ]] || die 'The graphical installer launcher is missing.'
@@ -63,14 +63,18 @@ PY
     authselect check
     usermod --lock root
 
-    # Preserve the Fedora policy packages and PAM files. This particular image
-    # explicitly boots with SELinux disabled; its installer profile carries the
-    # same decision into the installed system.
+    # Preserve the maintained Fedora PAM files and require enforcing policy in
+    # both the read-only image and the installed target.
     if grep -q '^SELINUX=' /etc/selinux/config; then
-        sed -i 's/^SELINUX=.*/SELINUX=disabled/' /etc/selinux/config
+        sed -i 's/^SELINUX=.*/SELINUX=enforcing/' /etc/selinux/config
     else
-        printf '\nSELINUX=disabled\n' >> /etc/selinux/config
+        printf '\nSELINUX=enforcing\n' >> /etc/selinux/config
     fi
+    [[ -f /root/check-selinux.py && ! -L /root/check-selinux.py ]] || die 'The staged SELinux policy check is missing.'
+    python3 /root/check-selinux.py policy
+    # The configuration RPM stays installed on the target. Catch reverse
+    # dependencies here before the interactive installer reaches RPM removal.
+    rpm --erase --test fedora-dde-installer
     for hook in 20-grub.install 50-dracut.install 51-dracut-rescue.install; do
         [[ -s /usr/lib/kernel/install.d/$hook && -x /usr/lib/kernel/install.d/$hook ]] ||
             die "Missing conventional kernel-install hook: $hook"
@@ -122,6 +126,7 @@ configure_boot() {
     (( is_live == 1 )) || exit 0
     [[ ! -e /etc/fedora-dde-installer-target ]] || exit 0
     verify_profile
+    [[ $(getenforce) == Enforcing ]] || die 'This Live image requires SELinux Enforcing.'
 
     if ! getent passwd liveuser >/dev/null; then
         useradd --create-home --user-group --groups wheel --shell /bin/bash --comment 'Live User' liveuser
@@ -141,6 +146,15 @@ configure_boot() {
     fi
     install -d -m 0755 /run/issue.d
     printf '\nFedora DDE Remix Live: username liveuser, password liveuser.\n' > /run/issue.d/90-fedora-dde-live.issue
+    # These files are created in the writable overlay, after the immutable
+    # payload was labelled. Restore their Fedora contexts before DDM starts.
+    restorecon -R /home/liveuser /run/issue.d
+    restorecon /etc/passwd /etc/shadow /etc/group /etc/gshadow
+    for account_file in /etc/subuid /etc/subgid /var/spool/mail/liveuser; do
+        if [[ -e $account_file ]]; then
+            restorecon "$account_file"
+        fi
+    done
     printf '%s\n' 'Live account prepared. Sign in through DDM as liveuser.'
 }
 

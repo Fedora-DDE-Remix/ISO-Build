@@ -6,6 +6,9 @@ on:
     paths-ignore:
       - '*.md'
       - LICENSE
+      - '.github/workflows/test-install.yml'
+      - 'scripts/test-install-vm.py'
+      - 'scripts/vm-*'
   workflow_dispatch:
 
 permissions:
@@ -18,9 +21,11 @@ concurrency:
 
 jobs:
   compose:
-    name: Fedora 45 x86_64 Live ISO (SELinux disabled)
+    name: Fedora 45 x86_64 Live ISO (SELinux Enforcing)
     runs-on: ubuntu-24.04
     timeout-minutes: 180
+    outputs:
+      iso-artifact: ${{ steps.recipe.outputs.iso_artifact }}
     steps:
       - name: Check out ISO recipe
         uses: actions/checkout@v4
@@ -35,6 +40,7 @@ jobs:
           source config/build.env
           [[ $INSTALLER_REF =~ ^[0-9a-f]{40}$ ]]
           echo "installer_ref=$INSTALLER_REF" >> "$GITHUB_OUTPUT"
+          echo "iso_artifact=Fedora-DDE-Remix-$CONFIG_VERSION-x86_64-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
 
       - name: Check out the pinned installer
         uses: actions/checkout@v4
@@ -122,7 +128,7 @@ jobs:
       - name: Upload ISO and checksums
         uses: actions/upload-artifact@v4
         with:
-          name: Fedora-DDE-Remix-45-x86_64-${{ github.run_number }}
+          name: ${{ steps.recipe.outputs.iso_artifact }}
           path: |
             artifacts/*.iso
             artifacts/*CHECKSUM*
@@ -131,7 +137,7 @@ jobs:
             artifacts/container-image.json
             artifacts/rpm-manifest.txt
           compression-level: 0
-          retention-days: 14
+          retention-days: 90
           if-no-files-found: error
 
       - name: Upload build logs and RPM inputs
@@ -144,7 +150,7 @@ jobs:
             artifacts/rpms/
             artifacts/*.txt
             artifacts/*.json
-          retention-days: 14
+          retention-days: 30
           if-no-files-found: warn
 
       - name: Write build summary
@@ -152,13 +158,15 @@ jobs:
         shell: bash
         run: |
           {
-            echo '## Fedora 45 DDE Remix development ISO'
+            echo '## Fedora 45 DDE Remix ISO'
             echo
             echo '- Architecture: x86_64'
-            echo '- SELinux: disabled in Live and installed systems for this recipe'
+            echo '- SELinux: Enforcing in the Live image and installed system'
+            echo '- PAM: native Fedora configuration supplied by the maintainer DDM package'
             echo '- Live login: `liveuser` / `liveuser` (manual login)'
             echo '- Desktop: maintainer comps RPM, then `dnf group install dde-desktop`'
             echo '- Installer revision: `${{ steps.recipe.outputs.installer_ref }}`'
+            echo '- Release verification: the following VM job must pass a real installation and disk boot'
             echo
             if compgen -G 'artifacts/*.iso' > /dev/null; then
               echo '### ISO files'
@@ -167,4 +175,12 @@ jobs:
               echo 'No ISO was produced. Inspect the build logs for the failed stage.'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+  installation:
+    name: Install and boot the composed ISO
+    needs: compose
+    uses: ./.github/workflows/test-install.yml
+    with:
+      iso-run-id: ${{ github.run_id }}
+      iso-artifact-name: ${{ needs.compose.outputs.iso-artifact }}
 
