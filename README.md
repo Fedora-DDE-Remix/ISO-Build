@@ -4,6 +4,10 @@
 `Fedora-DDE-Remix/fedora-dde-installer`，在当前 Live 会话内完成安装、用户、
 密码、时区和键盘配置，由用户决定何时重启。
 
+**45.20261127 已生成 ISO，但桌面验收失败，尚未作为正式 Release 发布。**
+严格实测捕获了 DDE 桌面插件的 SIGSEGV 和黑屏；安装、分区和硬盘启动的独立结果见
+[本版验证报告](VALIDATION-45.20261127.md)。
+
 **45.20261127 版保持 SELinux Enforcing**：Live 和安装目标使用 Fedora 原生 PAM，
 系统配置为 `SELINUX=enforcing`。Live 启动参数显式包含 `selinux=1 enforcing=1`；
 安装器为目标系统生成正常磁盘引导参数，使用 Fedora 默认的 Enforcing 行为。
@@ -79,8 +83,10 @@ SHA-256，使用 OVMF UEFI 或 SeaBIOS、独立 sparse qcow2、QEMU 的本地 UN
 2. 正常登录 Live，检查 Enforcing 和真实 DDM 桌面会话。
 3. 调用 ISO 内安装器的完整后端流程，实际分区、复制、配置用户、部署引导并完成安装。
 4. 关机并移除 ISO，从同一个虚拟硬盘启动。
-5. 验证普通用户、wheel 权限、锁定的 root、Live 账户清理、可写根目录、Enforcing、
-   以及新用户经 DDM 登录后仍在运行的 Treeland / DDE Shell 会话。
+5. 验证普通用户、wheel 权限、锁定的 root、Live 账户清理、可写根目录和 Enforcing。
+6. 新用户经 DDM 输入密码后，要求同一次启动内没有新增的目标用户 `dde-shell`
+   崩溃记录，并检查会话及非黑画面持续存在至少 8 秒。保存截图供人工核验；
+   仅有 Treeland / DDE Shell 进程不能证明桌面成功，非黑画面本身也不证明全部桌面功能正常。
 
 测试覆盖以下组合，所有场景都必须安装后移除 ISO 并从磁盘启动：
 
