@@ -16,6 +16,11 @@ on:
         required: false
         default: all
         type: string
+      continue-after-desktop-failure:
+        description: Collect disk diagnostics after a desktop failure; overall result still fails
+        required: false
+        default: false
+        type: boolean
   workflow_dispatch:
     inputs:
       iso-run-id:
@@ -39,6 +44,11 @@ on:
           - bios-mbr-ext4
           - uefi-xfs-home-swap
           - uefi-preserve
+      continue-after-desktop-failure:
+        description: Collect disk diagnostics after a desktop failure (still fails overall)
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -149,16 +159,22 @@ jobs:
         shell: bash
         env:
           TEST_SCENARIO: ${{ matrix.scenario }}
+          CONTINUE_AFTER_DESKTOP_FAILURE: ${{ inputs.continue-after-desktop-failure }}
         run: |
           set -euo pipefail
           shopt -s nullglob
           images=(artifacts/iso/*.iso)
           (( ${#images[@]} == 1 ))
+          diagnostic_options=()
+          if [[ "$CONTINUE_AFTER_DESKTOP_FAILURE" == true ]]; then
+            diagnostic_options+=(--continue-after-desktop-failure)
+          fi
           python3 scripts/test-install-vm.py \
             --iso "${images[0]}" \
             --work-dir "$RUNNER_TEMP/fedora-dde-install-vm" \
             --output-dir artifacts/vm/test --timeout 5400 \
             --scenario "$TEST_SCENARIO" \
+            "${diagnostic_options[@]}" \
             2>&1 | tee artifacts/vm/controller.log
 
       - name: Upload installation evidence

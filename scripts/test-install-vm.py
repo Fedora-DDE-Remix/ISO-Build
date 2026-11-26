@@ -83,6 +83,28 @@ def command(argv, *, timeout=120, check=True, input_text=None):
     return result
 
 
+def greeter_evidence(screen, session, user, *, password_required=False):
+    """Recognize observed DDM controls without mistaking a getty for a greeter."""
+    text = screen["text"]
+    terminal = re.search(r"\blogin\s*:|\bKernel\s+\S+\s+on\s+\S+|"
+                         r"Fedora\s+DDE\s+Remix\s+Live:\s+username", text, re.I)
+    names = {user.casefold(), "live" if user == LIVE_USER else user.casefold()}
+    password_words = [w for w in screen["words"]
+                      if w["text"].casefold().strip(".,:;!?") == "password"]
+    user_words = [w for w in screen["words"] if w["text"].casefold().strip(".,:") in names]
+    if terminal:
+        reason = "A text getty is visible; it is not the DDM graphical greeter."
+    elif not session["treeland"]:
+        reason = "No running Treeland compositor was observed."
+    elif not password_words and (password_required or not user_words):
+        reason = "No graphical password prompt or matching user tile was observed."
+    else:
+        reason = "Running Treeland and graphical login controls were observed."
+    return {"ready": not terminal and bool(session["treeland"])
+                     and bool(password_words or (user_words and not password_required)),
+            "reason": reason, "password_words": password_words, "user_words": user_words}
+
+
 class Report:
     def __init__(self, directory, timeout):
         self.directory = directory
@@ -614,36 +636,57 @@ class VM:
         log("GRUB accepted the original ISO search/kernel/initrd commands; booting and waiting for serial login.")
         self.serial.send("boot\n")
 
+    def wait_greeter(self, user, deadline, name, *, password_required=False, before_password=False):
+        # A black loading screen may recover. A compositor crash may instead
+        # expose a getty whose issue text also contains the word "password".
+        # Observe both processes and the screen; never send a wake-up Enter or
+        # credentials until the real graphical controls have been identified.
+        deadline = min(deadline, time.monotonic() + 120)
+        observations = []
+        previous_reason = None
+        while time.monotonic() < deadline:
+            session = self.guest.check("session", user,
+                timeout=min(45, max(1, deadline - time.monotonic())), name=f"{name}-session")
+            if before_password:
+                require(not session["ready"] and not session["ddm_sessions"],
+                        "A graphical user session appeared before password entry (unexpected autologin).")
+            screen = self.screen(f"{name}-{len(observations) + 1:02d}")
+            evidence = greeter_evidence(screen, session, user, password_required=password_required)
+            observations.append({"observed_at": utc(), "ready": evidence["ready"],
+                "reason": evidence["reason"], "screenshot": str(Path(screen["path"]).relative_to(self.output)),
+                "treeland": session["treeland"]})
+            (self.output / f"{name}-gate.json").write_text(json.dumps(observations, indent=2) + "\n")
+            if evidence["reason"] != previous_reason:
+                log(evidence["reason"])
+                previous_reason = evidence["reason"]
+            if evidence["ready"]:
+                return screen, evidence
+            time.sleep(max(0, min(5, deadline - time.monotonic())))
+        reason = observations[-1]["reason"] if observations else "The graphical login deadline expired."
+        raise Failure("DDM greeter unavailable before password entry: " + reason)
+
     def desktop_login(self, user, password, timeout):
         deadline = time.monotonic() + self.report.remaining(timeout)
         initial = self.guest.check("session", user, timeout=60, name="session-before-login")
         require(not initial["ready"] and not initial["ddm_sessions"], "A graphical user session appeared before password entry (unexpected autologin).")
         # Keep the guest's normal greeter and compositor. OCR locates the
         # password placeholder/user tile; no display-manager config is changed.
-        initial_screen = self.screen("ddm-before-login")
-        if not any("password" in w["text"].lower() for w in initial_screen["words"]):
-            self.qmp.key("ret")
-            time.sleep(1)
         attempts = []
         for attempt in range(2):
             require(time.monotonic() < deadline, "The graphical login deadline expired.")
-            screen = self.screen(f"ddm-login-attempt-{attempt + 1}")
-            password_words = [w for w in screen["words"] if "password" in w["text"].lower()]
-            if password_words:
-                word = password_words[0]
+            name = f"ddm-login-attempt-{attempt + 1}"
+            screen, evidence = self.wait_greeter(user, deadline, name, before_password=attempt == 0)
+            if not evidence["password_words"]:
+                # Click only an observed user tile, then wait for the resulting
+                # password UI before entering any credentials.
+                word = evidence["user_words"][0]
                 self.qmp.click(word["left"] + word["width"] / 2, word["top"] + word["height"] / 2,
                                screen["width"], screen["height"])
-            elif attempt == 1:
-                # An unselected user tile is the common alternative to the
-                # initially focused password field. Only click its observed
-                # label, never a guessed screen coordinate.
-                names = {user.casefold(), "live" if user == LIVE_USER else user.casefold()}
-                candidates = [w for w in screen["words"] if w["text"].casefold().strip(".,:") in names]
-                require(candidates, "No password field or matching user tile could be located in the real DDM screen.")
-                word = candidates[0]
-                self.qmp.click(word["left"] + word["width"] / 2, word["top"] + word["height"] / 2,
-                               screen["width"], screen["height"])
-                time.sleep(1)
+                screen, evidence = self.wait_greeter(user, deadline, name + "-password",
+                    password_required=True, before_password=attempt == 0)
+            word = evidence["password_words"][0]
+            self.qmp.click(word["left"] + word["width"] / 2, word["top"] + word["height"] / 2,
+                           screen["width"], screen["height"])
             self.qmp.key("ctrl", "a")
             self.qmp.type(password)
             self.qmp.key("ret")
@@ -691,17 +734,17 @@ class VM:
         (self.output / "shutdown.json").write_text(json.dumps({"qemu_exit_status": 0, "event": shutdown,
             "serial_marker_note": redact(framing_error) if framing_error else None}, indent=2) + "\n")
 
-    def diagnostics(self):
+    def diagnostics(self, name="diagnostics"):
         if self.process is None or self.process.poll() is not None:
             return
         with contextlib.suppress(Exception):
-            self.screen("failure-or-final-state")
+            self.screen("failure-or-final-state" if name == "diagnostics" else name + "-state")
         if self.guest and self.guest.recover():
             try:
-                data = self.guest.check("diagnostics", timeout=180, name="diagnostics", budget=False)
-                (self.output / "diagnostics.json").write_text(redact(json.dumps(data, indent=2)) + "\n")
+                data = self.guest.check("diagnostics", timeout=180, name=name, budget=False)
+                (self.output / f"{name}.json").write_text(redact(json.dumps(data, indent=2)) + "\n")
             except Exception as error:
-                (self.output / "diagnostics-error.txt").write_text(redact(str(error)) + "\n")
+                (self.output / f"{name}-error.txt").write_text(redact(str(error)) + "\n")
 
     def close(self):
         if self.process is not None and self.process.poll() is None:
@@ -736,6 +779,8 @@ def main():
     parser.add_argument("--timeout", type=int, default=5400, help="Overall deadline in seconds (plus bounded failure diagnostics).")
     parser.add_argument("--boot-timeout", type=int, default=900)
     parser.add_argument("--desktop-timeout", type=int, default=420)
+    parser.add_argument("--continue-after-desktop-failure", action="store_true",
+                        help="Diagnose independent installation/reboot checks after a failed desktop stage; the overall result still fails.")
     parser.add_argument("--memory", type=int, help="Guest RAM in MiB; defaults to at most 8192, keeping host headroom.")
     parser.add_argument("--cpus", type=int, help="Guest vCPUs; defaults to at most 4.")
     parser.add_argument("--ovmf-code")
@@ -757,11 +802,29 @@ def main():
     report = Report(output, args.timeout)
     report.data["scenario"] = args.scenario
     report.data["graphical_layout_planner_tested"] = False
+    report.data["continue_after_desktop_failure"] = args.continue_after_desktop_failure
+    report.data["desktop_failures"] = []
+    report.data["installation_checks_completed"] = False
     vm = None
     failure = None
 
+    def record_desktop_failure(phase, error):
+        # The stage context has already marked this stage FAILED. Preserve its
+        # failure-time diagnostics separately from later installation logs.
+        detail = vm.output / "desktop-failure.txt"
+        detail.write_text(redact(traceback.format_exc()))
+        report.data["desktop_failures"].append({"phase": phase, "error": redact(str(error)),
+            "failed_at": utc(), "traceback": str(detail.relative_to(output)),
+            "continued_for_installation_diagnostics": args.continue_after_desktop_failure})
+        report.save()
+        if args.continue_after_desktop_failure:
+            log(f"FAILED {phase} desktop stage: {error}; continuing independent installation checks for diagnostics.")
+            vm.diagnostics(name="desktop-failure-diagnostics")
+
     def interrupted(signum, frame):
-        raise Failure(f"Received signal {signum}; collecting diagnostics before stopping QEMU.")
+        # Cancellation must never enter the optional desktop-failure recovery
+        # path and start further installation work.
+        raise InterruptedError(f"Received signal {signum}; collecting diagnostics before stopping QEMU.")
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
     try:
@@ -808,9 +871,14 @@ def main():
             live = vm.guest.check("baseline", "live", timeout=300)
             report.data["evidence"]["live"] = live
 
-        with report.stage("live-ddm-password-login-and-desktop"):
-            report.data["evidence"]["live_login"] = vm.desktop_login(LIVE_USER, LIVE_PASSWORD, args.desktop_timeout)
-            report.data["evidence"]["live_pam"] = vm.guest.check("pam", LIVE_USER, timeout=180)
+        try:
+            with report.stage("live-ddm-password-login-and-desktop"):
+                report.data["evidence"]["live_login"] = vm.desktop_login(LIVE_USER, LIVE_PASSWORD, args.desktop_timeout)
+                report.data["evidence"]["live_pam"] = vm.guest.check("pam", LIVE_USER, timeout=180)
+        except Failure as error:
+            record_desktop_failure("live", error)
+            if not args.continue_after_desktop_failure:
+                raise
 
         with report.stage("prepare-disposable-partition-scenario"):
             report.data["evidence"]["partition_plan"] = vm.guest.check("prepare", timeout=180)
@@ -846,21 +914,32 @@ def main():
             require(disk["boot_id"] != live["boot_id"], "The installed system did not reboot into a new kernel session.")
             require(disk["build_info"] == live["build_info"], "The installed system differs from the tested ISO build provenance.")
             report.data["evidence"]["installed"] = disk
+            report.data["installation_checks_completed"] = True
 
-        with report.stage("installed-ddm-password-login-and-desktop"):
-            report.data["evidence"]["installed_login"] = vm.desktop_login(TEST_USER, TEST_PASSWORD, args.desktop_timeout)
-            report.data["evidence"]["installed_pam"] = vm.guest.check("pam", TEST_USER, timeout=180)
-            policy = vm.guest.check("baseline", "installed", installed["root_uuid"], timeout=300, name="after-login-enforcing")
-            report.data["evidence"]["enforcing_after_desktop_login"] = policy["selinux"]
+        try:
+            with report.stage("installed-ddm-password-login-and-desktop"):
+                report.data["evidence"]["installed_login"] = vm.desktop_login(TEST_USER, TEST_PASSWORD, args.desktop_timeout)
+                report.data["evidence"]["installed_pam"] = vm.guest.check("pam", TEST_USER, timeout=180)
+                policy = vm.guest.check("baseline", "installed", installed["root_uuid"], timeout=300, name="after-login-enforcing")
+                report.data["evidence"]["enforcing_after_desktop_login"] = policy["selinux"]
+        except Failure as error:
+            record_desktop_failure("installed", error)
+            if not args.continue_after_desktop_failure:
+                raise
 
         with report.stage("collect-evidence-and-shut-down-installed-system"):
             diagnostics = vm.guest.check("diagnostics", timeout=180)
             (vm.output / "diagnostics.json").write_text(redact(json.dumps(diagnostics, indent=2)) + "\n")
-            vm.screenshot("installed-desktop-verified")
+            vm.screenshot("installed-system-final-state")
             vm.poweroff()
             vm.close()
             vm = None
             require(sha256(args.iso) == report.data["iso"]["sha256"], "The release ISO changed during testing.")
+        report.data["iso_unchanged"] = True
+        if report.data["desktop_failures"]:
+            phases = ", ".join(item["phase"] for item in report.data["desktop_failures"])
+            raise Failure("Installation, disk-only reboot and installed-system checks completed, "
+                          f"but desktop stages failed ({phases}); this diagnostic run has not passed.")
         report.data.update(status="passed", finished_at=utc(), iso_unchanged=True)
         log("PASS: final ISO installed through the real backend; disk-only reboot, Enforcing SELinux and both DDM desktops verified.")
     except BaseException as error:
