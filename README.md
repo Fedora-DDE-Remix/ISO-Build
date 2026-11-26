@@ -4,11 +4,19 @@
 `Fedora-DDE-Remix/fedora-dde-installer`，在当前 Live 会话内完成安装、用户、
 密码、时区和键盘配置，由用户决定何时重启。
 
-**45.20261126 版恢复 SELinux Enforcing**：Live 和安装目标使用 Fedora 原生 PAM，
+**45.20261127 版保持 SELinux Enforcing**：Live 和安装目标使用 Fedora 原生 PAM，
 系统配置为 `SELINUX=enforcing`。Live 启动参数显式包含 `selinux=1 enforcing=1`；
 安装器为目标系统生成正常磁盘引导参数，使用 Fedora 默认的 Enforcing 行为。
 镜像使用维护者发布的 DDM 和 DDE SELinux 策略包，构建时验证策略注册和文件标签。
 正式交付还需要通过下面的实际虚拟机安装检查；仅生成 ISO 不代表安装验证通过。
+
+此版在 ISO 配置 RPM 中加入 DDM 的 `kmsconvt@tty1.service` 启动顺序和冲突声明。
+Fedora 45 的新 VT 控制台使用该单元，DDM 上游 0.5.0 原单元仅处理传统
+`getty@tty1.service`。缺少新声明可能让 tty1 控制台和 Treeland 同时竞争显卡控制权；
+虚拟机曾实际观察到黑屏、Treeland 分配缓冲区失败和重复崩溃。
+该配置由本仓库的 RPM 单独管理，采用
+[Fedora 同类问题的处理方式](https://bugzilla.redhat.com/show_bug.cgi?id=2549227)，
+图形登录恢复情况仍以新版 ISO 的实际测试报告为准。
 
 ## 桌面软件来源
 
@@ -90,7 +98,12 @@ SHA-256，使用 OVMF UEFI 或 SeaBIOS、独立 sparse qcow2、QEMU 的本地 UN
 完成的报告为准；实体硬件、Secure Boot、多磁盘与加密安装不在这组测试范围内。
 
 如需对同一镜像重试，在 **Test ISO installation → Run workflow** 填入构建
-run ID 和完整 ISO artifact 名称。控制器改动不会自动触发重新 compose。
+run ID 和完整 ISO artifact 名称；`scenario` 默认 `all`，也可选一组分区。
+控制器改动不会自动触发重新 compose。
+
+诊断选项 `continue-after-desktop-failure` 默认关闭。显式开启时，桌面失败仍被
+记录，并允许继续收集独立的实际安装、分区和磁盘启动结果；任何桌面失败都会
+令总结果失败，不能据此认定正式验收通过。正常 compose 后的自动验收保持严格模式。
 
 `config/build.env` 固定安装器提交。工作流优先复用该提交已经通过完整构建和测试的
 安装器 CI artifact，同时核对源提交和固定 ZIP SHA-256；这项只读下载不把 GitHub

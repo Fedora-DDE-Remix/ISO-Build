@@ -211,7 +211,7 @@ config_top=/work/config-rpmbuild
 config_source=/work/config-sources/fedora-dde-remix-config-$CONFIG_VERSION
 mkdir -p "$config_top"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS} "$config_source"/{config,scripts}
 install -m644 /workspace/LICENSE /workspace/README.md "$config_source/"
-install -m644 /workspace/config/{install-profile.json,fedora-dde-live.service} "$config_source/config/"
+install -m644 /workspace/config/{install-profile.json,fedora-dde-live.service,ddm-kmscon.conf} "$config_source/config/"
 install -m755 /workspace/scripts/configure-live.sh "$config_source/scripts/"
 tar -C /work/config-sources -czf "$config_top/SOURCES/fedora-dde-remix-config-$CONFIG_VERSION.tar.gz" \
     "fedora-dde-remix-config-$CONFIG_VERSION"

@@ -70,6 +70,8 @@ unsquashfs -xattrs -no-progress -d "$temporary/root" "$temporary/payload.img" \
     usr/lib/os-release usr/lib/kernel/install.d \
     usr/lib/dracut/dracut.conf.d/02-rescue.conf \
     usr/lib/systemd/system/fedora-dde-live.service usr/libexec/fedora-dde-live \
+    usr/lib/systemd/system/ddm.service.d/20-fedora-kmscon.conf \
+    usr/lib/sysimage/rpm \
     usr/share/fedora-dde-remix/rpm-manifest.txt \
     usr/share/fedora-dde-remix/build-info.json \
     usr/share/applications/fedora-dde-installer.desktop \
@@ -82,6 +84,7 @@ python3 - "$temporary/root" "$manifest" "$build_info" <<'PY'
 from pathlib import Path
 import json
 import re
+import subprocess
 import sys
 root, manifest, build_info = map(Path, sys.argv[1:])
 def regular(relative):
@@ -103,6 +106,13 @@ service = regular('usr/lib/systemd/system/fedora-dde-live.service').read_text()
 assert 'ConditionKernelCommandLine=rd.live.image' in service, 'Live service has no kernel condition'
 assert 'ExecStart=/usr/libexec/fedora-dde-live boot' in service, 'Live service does not use the boot helper'
 assert regular('usr/libexec/fedora-dde-live').stat().st_mode & 0o111, 'Live helper is not executable'
+kmscon_path = 'usr/lib/systemd/system/ddm.service.d/20-fedora-kmscon.conf'
+kmscon_dropin = regular(kmscon_path)
+kmscon_lines = [line.strip() for line in kmscon_dropin.read_text().splitlines()
+               if line.strip() and not line.lstrip().startswith(('#', ';'))]
+assert kmscon_lines == ['[Unit]', 'After=kmsconvt@tty1.service',
+                        'Conflicts=kmsconvt@tty1.service'], 'DDM does not reserve tty1 from kmscon'
+assert kmscon_dropin.stat().st_uid == 0 and not kmscon_dropin.stat().st_mode & 0o022, 'Unsafe DDM drop-in ownership or permissions'
 assert 'Exec=/usr/bin/fedora-dde-installer-launch' in regular('usr/share/applications/fedora-dde-installer.desktop').read_text()
 for name in ('20-grub.install', '50-dracut.install', '51-dracut-rescue.install'):
     hook = regular('usr/lib/kernel/install.d/' + name)
@@ -126,6 +136,18 @@ expected = {'iso_repository': 'Fedora-DDE-Remix/ISO-Build',
             'copr': 'mozixun/Fedora-DDE-Remix', 'desktop_group': 'dde-desktop', 'live_login': 'manual'}
 assert isinstance(data, dict) and all(data.get(k) == v for k, v in expected.items()), 'Unexpected build information'
 assert all(re.fullmatch(r'[0-9a-f]{40}', data.get(k, '')) for k in ('iso_commit', 'installer_commit')), 'Invalid source commit'
+# Query the extracted image database, never the builder's installed RPMs.
+# The configuration package must own the actual drop-in and remain installed
+# after the Live installer is removed from the target system.
+regular('usr/lib/sysimage/rpm/rpmdb.sqlite')
+owner = subprocess.check_output(
+    ['rpm', '--root', str(root), '--dbpath', '/usr/lib/sysimage/rpm',
+     '-qf', '/' + kmscon_path, '--qf',
+     '%{NAME}\t%{EPOCHNUM}\t%{VERSION}\t%{RELEASE}\t%{ARCH}\n'], text=True).strip().split('\t')
+assert len(owner) == 5 and owner[0] == 'fedora-dde-remix-config' and owner[4] == 'noarch', 'DDM drop-in is not owned by the image configuration RPM'
+assert owner[2] == data.get('image_version'), 'DDM configuration RPM version differs from the image provenance'
+owner_manifest = f'{owner[0]}\t{owner[1]}:{owner[2]}-{owner[3]}\t{owner[4]}'
+assert owner_manifest in included.decode().splitlines(), 'DDM configuration RPM owner is absent from the payload manifest'
 names = {line.split('\t')[0] for line in included.decode().splitlines()}
 required = {'dde-desktop-comps', 'ddm', 'dde-session', 'dde-shell', 'treeland',
             'fedora-dde-installer', 'fedora-dde-remix-config', 'kernel-core',
@@ -135,12 +157,14 @@ required = {'dde-desktop-comps', 'ddm', 'dde-session', 'dde-shell', 'treeland',
 assert required <= names, f'Required RPMs missing: {sorted(required - names)}'
 assert 'systemd-homed' not in names, 'systemd-homed is not supported by this image'
 print(f'Payload verified: Fedora 45, {len(names)} package names, no baked-in Live account.')
+print(f'DDM tty1 conflict verified; payload RPM owner: {owner_manifest}')
 PY
 printf '%s\n' \
     'BIOS and UEFI hybrid ISO entries: present' \
     'All ISO Linux boot entries: rd.live.image, selinux=1 and enforcing=1' \
     'Payload: direct read-only SquashFS with dmsquash-live initrd' \
     'Actual payload SELinux xattrs: core system/DDM types and image-policy mountpoint contexts verified' \
+    'DDM tty1 kmscon conflict: present and owned by the provenance-matched image configuration RPM' \
     'Conventional kernel-install and rescue hooks: preserved' \
     'Temporary Live account and empty password entries: absent' \
     'Embedded and external RPM manifests: identical' \
