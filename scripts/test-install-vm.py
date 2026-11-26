@@ -248,7 +248,9 @@ class Serial:
         if ready:
             data = self.socket.recv(65536)
             require(bool(data), "Serial connection closed.")
-            self.buffer += ANSI.sub("", data.decode("utf-8", errors="replace")).replace("\r", "")
+            # Terminal escape sequences can span multiple socket reads. Keep
+            # incomplete sequences until the following chunk completes them.
+            self.buffer = ANSI.sub("", self.buffer + data.decode("utf-8", errors="replace")).replace("\r", "")
             require(len(self.buffer) < 64 * 1024**2, "Guest command output exceeded the 64 MiB bound.")
 
     def expect(self, pattern, timeout):
@@ -542,6 +544,7 @@ class VM:
             screen = self.screen()
             if re.search(r"GNU\s+GRUB|Start\s+Fedora|Test\s+this\s+media|Troubleshooting", screen["text"], re.I):
                 self.screenshot("iso-grub-menu")
+                log("Observed the final ISO GRUB menu; configuring and synchronizing its serial console.")
                 break
             time.sleep(2)
         else:
@@ -551,12 +554,36 @@ class VM:
         self.qmp.type("serial --unit=0 --speed=115200 --word=8 --parity=no --stop=1\n")
         self.qmp.type("terminal_input --append serial\n")
         self.qmp.type("terminal_output --append serial\n")
-        self.serial.expect(r"grub>\s*", self.report.remaining(60))
+        # OVMF can already forward its GRUB console to serial. An old grub>
+        # prompt is therefore not proof that queued keyboard input has drained.
+        # First observe a unique *output line* from the final keyboard command;
+        # only then switch input channels and prove serial input works as well.
+        keyboard_token = "vmgrubkeyboard" + uuid.uuid4().hex[:12]
+        self.qmp.key("ctrl", "u")
+        self.qmp.type("echo " + keyboard_token + "\n")
+        keyboard_output, _ = self.serial.expect(r"(?:^|\n)" + keyboard_token + r"\n", self.report.remaining(90))
+        self.serial.expect(r"grub>\s*", self.report.remaining(30))
+        serial_token = "vmgrubserial" + uuid.uuid4().hex[:12]
+        self.serial.send("\x15echo " + serial_token + "\n")
+        serial_output, _ = self.serial.expect(r"(?:^|\n)" + serial_token + r"\n", self.report.remaining(60))
+        self.serial.expect(r"grub>\s*", self.report.remaining(30))
+        (self.output / "grub-handoff.log").write_text(
+            keyboard_output + "\nKeyboard handshake complete.\n" + serial_output + "\nSerial handshake complete.\n")
+        setup_errors = [line for line in keyboard_output.splitlines() if line.startswith("error:")]
+        handoff = {"keyboard_output_handshake": "passed", "serial_input_output_handshake": "passed",
+                   "terminal_setup_errors": setup_errors,
+                   "path": "existing console verified despite terminal setup errors" if setup_errors
+                           else "serial console verified"}
+        (self.output / "grub-handoff.json").write_text(json.dumps(handoff, indent=2) + "\n")
+        self.report.data["evidence"]["grub_handoff"] = handoff
+        self.report.save()
+        log("GRUB keyboard and serial input/output handshakes passed.")
         for key in ("search", "kernel", "initrd"):
             self.serial.send(grub[key] + "\n")
             text, _ = self.serial.expect(r"grub>\s*", self.report.remaining(120))
             require(not re.search(r"(?im)^error:", text), f"GRUB rejected the final ISO's {key} command: {text}")
         self.screenshot("iso-grub-serial-boot")
+        log("GRUB accepted the original ISO search/kernel/initrd commands; booting and waiting for serial login.")
         self.serial.send("boot\n")
 
     def desktop_login(self, user, password, timeout):
