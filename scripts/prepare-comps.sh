@@ -46,7 +46,7 @@ download_https() {
 if ! dnf --refresh --repo="$repository_id" \
     --setopt="$repository_id.baseurl=$repository_url" \
     --setopt="$repository_id.skip_if_unavailable=False" \
-    download --destdir "$bootstrap" dde-desktop-comps; then
+    download --arch=noarch --destdir "$bootstrap" dde-desktop-comps; then
     die 'The production COPR repository must provide the current comps RPM before a release ISO can be composed.'
 fi
 
