@@ -165,9 +165,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf xorriso tesseract-ocr python3-pil acl
           mkdir -p artifacts/vm "$RUNNER_TEMP/fedora-dde-install-vm"
-          if [[ -e /dev/kvm ]]; then
-            sudo setfacl -m "u:$(id -u):rw" /dev/kvm
-          fi
           df -h "$RUNNER_TEMP" > artifacts/vm/host-filesystems.txt
           free -h > artifacts/vm/host-memory.txt
           qemu-system-x86_64 --version > artifacts/vm/qemu-version.txt
@@ -184,6 +181,46 @@ jobs:
             echo 'At least 30 GiB free host space is required before downloading the ISO.' >&2
             exit 1
           fi
+
+      - name: Prepare unprivileged KVM group access
+        id: kvm_access
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            runner_uid=$(id -u)
+            runner_gid=$(id -g)
+            runner_name=$(id -un)
+            if (( runner_uid == 0 )); then
+              echo 'The VM controller must run as the existing non-root runner.' >&2
+              exit 1
+            fi
+            kvm_gid=-1
+            if [[ -e /dev/kvm || -L /dev/kvm ]]; then
+              if [[ ! -c /dev/kvm ]]; then
+                echo '/dev/kvm exists but is not a character device; refusing authorization.' >&2
+                exit 1
+              fi
+              kvm_record=$(getent group kvm) || {
+                echo 'The existing KVM device has no resolvable kvm group.' >&2
+                exit 1
+              }
+              IFS=: read -r kvm_name unused kvm_gid unused <<< "$kvm_record"
+              if [[ "$kvm_name" != kvm || ! "$kvm_gid" =~ ^[1-9][0-9]*$ ]] || \
+                 [[ "$(stat -c %g /dev/kvm)" != "$kvm_gid" ]]; then
+                echo '/dev/kvm is not owned by the resolved kvm group; refusing authorization.' >&2
+                exit 1
+              fi
+              # uaccess may replace named-user ACLs when a KVM VM exits.
+              # Keep the native device permissions and use its owning group.
+              sudo --non-interactive /usr/sbin/usermod --append --groups kvm -- "$runner_name"
+              id "$runner_name"
+            else
+              echo '/dev/kvm is absent; the controller may use its ordinary TCG fallback.'
+            fi
+            printf 'uid=%s\ngid=%s\nkvm_gid=%s\n' "$runner_uid" "$runner_gid" "$kvm_gid" >> "$GITHUB_OUTPUT"
+            printf 'Expected controller UID=%s GID=%s KVM_GID=%s\n' "$runner_uid" "$runner_gid" "$kvm_gid"
+          } 2>&1 | tee artifacts/vm/host-kvm-authorization.log
 
       - name: Check the graphical login controller regressions
         run: |
@@ -251,13 +288,57 @@ jobs:
           if [[ "$CONTINUE_AFTER_DESKTOP_FAILURE" == true ]]; then
             diagnostic_options+=(--continue-after-desktop-failure)
           fi
-          /usr/bin/python3 scripts/test-install-vm.py \
+          runner_uid='${{ steps.kvm_access.outputs.uid }}'
+          runner_gid='${{ steps.kvm_access.outputs.gid }}'
+          kvm_gid='${{ steps.kvm_access.outputs.kvm_gid }}'
+          [[ "$(id -u)" == "$runner_uid" && "$(id -g)" == "$runner_gid" ]]
+          # sudo initializes the target user's supplementary groups. Keep the
+          # original UID, primary GID, working directory and controller argv.
+          sudo --non-interactive --user="#$runner_uid" --group="#$runner_gid" -- \
+            /usr/bin/python3 - "$runner_uid" "$runner_gid" "$kvm_gid" "$PWD" \
+            /usr/bin/python3 scripts/test-install-vm.py \
             --iso "${images[0]}" \
             --work-dir "$RUNNER_TEMP/fedora-dde-install-vm" \
             --output-dir artifacts/vm/test --timeout 5400 \
             --scenario "$TEST_SCENARIO" \
             "${diagnostic_options[@]}" \
-            2>&1 | tee artifacts/vm/controller.log
+            <<'PY' 2>&1 | tee artifacts/vm/controller.log
+          import json, os, stat, sys
+          from pathlib import Path
+          uid, gid, kvm_gid = map(int, sys.argv[1:4])
+          expected_cwd = sys.argv[4]
+          evidence = {'uid': os.getuid(), 'euid': os.geteuid(),
+                      'gid': os.getgid(), 'egid': os.getegid(),
+                      'groups': os.getgroups(), 'cwd': os.getcwd(),
+                      'expected_uid': uid, 'expected_gid': gid, 'expected_kvm_gid': kvm_gid}
+          try:
+              if uid == 0 or (os.getuid(), os.geteuid(), os.getgid(), os.getegid()) != (uid, uid, gid, gid):
+                  raise RuntimeError('sudo changed the non-root controller identity.')
+              if os.getcwd() != expected_cwd:
+                  raise RuntimeError('sudo changed the controller working directory.')
+              if kvm_gid >= 0:
+                  node = os.stat('/dev/kvm')
+                  if not stat.S_ISCHR(node.st_mode) or node.st_gid != kvm_gid:
+                      raise RuntimeError('The authorized KVM device type or group changed.')
+                  if kvm_gid not in {os.getgid(), *os.getgroups()}:
+                      raise RuntimeError('sudo did not initialize the required KVM supplementary group.')
+                  descriptor = os.open('/dev/kvm', os.O_RDWR | os.O_CLOEXEC)
+                  os.close(descriptor)
+                  evidence['kvm_open'] = True
+              elif os.path.lexists('/dev/kvm'):
+                  raise RuntimeError('A KVM device appeared after host authorization; rerun host setup.')
+              else:
+                  evidence['kvm_absent_tcg_allowed'] = True
+              evidence['status'] = 'verified'
+          except (OSError, RuntimeError) as error:
+              evidence.update(status='failed', error=str(error))
+              raise
+          finally:
+              path = Path(expected_cwd) / 'artifacts/vm/host-kvm-controller.json'
+              path.write_text(json.dumps(evidence, indent=2) + '\n')
+              print('VM host authorization: ' + json.dumps(evidence), flush=True)
+          os.execv(sys.argv[5], sys.argv[5:])
+          PY
 
       - name: Upload installation evidence
         if: always()

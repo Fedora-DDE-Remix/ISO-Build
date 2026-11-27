@@ -3,8 +3,9 @@
 ## 当前结论
 
 当前候选的[实际 compose](https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/45981240945/job/140445377978)已成功，但首个 canary 在安装前的 Live 图形登录观察阶段失败。
-原运行没有安装或磁盘启动结果。采集器时间预算与诊断修复已通过局部回归，
-接下来用独立验证分支复验同一份 ISO；尚无新的 VM 通过结果。
+修正采集器后的同镜像复验已确认 DDM 认证并建立 Wayland 会话，但没有可用的
+dde-shell 桌面，仍未开始安装。新证据确认宿主 KVM 用户 ACL 在探测期间被清除，
+导致真实 VM 回退到 TCG；下一轮将稳定宿主设备访问，再检验普遍服务超时是否消失。
 本报告不是正式发行通过凭据。
 
 上一候选 `.2` 在原 schemas 严格编译处失败、未生成 ISO，见 [第二候选报告](VALIDATION-45.20261127.2.md)。
@@ -195,6 +196,67 @@ artifact 名、配方提交与原始 ISO SHA-256。下载后同时检查 CHECKSU
 修正仅让该测试接受 ENOENT/ESRCH，仍拒绝其他读取错误及尚存活的非僵尸进程；
 增加针对消失文件、权限错误和仍在运行状态的短回归后，控制器套件为 13 项。
 此失败保留在原 run，不作为实际桌面或存储结果。
+
+### 第二次专用复验：认证成功与 KVM 授权失效
+
+[Run 45989333939](https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/45989333939)
+使用测试提交 `c7c32d7fb75761e08f098ac5c0188b0a543f2359`，41 项宿主回归、真实 sudo
+shell、原 ISO 下载、来源与原始 SHA-256 校验全部通过。实际 VM 的 Live 桌面步骤
+在 420 秒原有预算结束时失败，`installation_checks_completed=false`。
+这次没有重新 compose；原 ISO 来源仍是 `de9549735f77fd426834f5a3a9a1c3cc9d206a14`。
+
+完整证据 [artifact 15193861879](https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/45989333939/artifacts/15193861879)
+为 `2,353,922` 字节，实际下载后独立核验 SHA-256：
+`361b5c587bc9fa7d4780cf5c36a1de52bca0f453c38016108af6692bf161bdaf`，共 58 个文件。
+
+认证证据相互吻合：DDM 日志于 `11:24:14Z` 记录密码认证成功，`11:24:20Z` 记录登录
+成功，Treeland 于 `11:24:22Z` 激活 liveuser/session 3。`11:24:54.687990Z` 的完整
+采样确认 `Service=ddm`、`Type=wayland`、`Class=user`、UID 1000、VT 2，且会话活动。
+同一时刻没有 dde-shell 进程，`ready=false`；当次完成的崩溃检查没有发现记录。
+此后 coreinfo 查询本身超时，不能将后续未知状态解释成“确认没有崩溃”。
+
+人工查看原截图 013/014/015，确认八个掩码、一次提交和最终只剩壁纸。没有面板、
+图标或完整桌面的通过证据。用户 ApplicationManager 服务反复启动超时并达到
+重启计数 4/5/6；audio、bluetooth、RTKit 和用户 systemctl 查询也有长延迟。
+当前日志不足以把这些异常归结为某一个包的唯一故障。22 条已收集 AVC 均是
+`kmscon_t` 对 `tmpfs_t` 的 filesystem getattr 拒绝，没有已收集的 DDM/dde-shell
+对应拒绝证据；SELinux 保持 Enforcing。
+
+ApplicationManager 的 `couldn't find app "dde-session-manager"` 提示已核对
+[固定上游源码](https://github.com/linuxdeepin/dde-application-manager/blob/713923b9a29340cbb3c82bf3d319496bcb75a4e8/src/dbus/applicationmanager1service.cpp)：
+在应用实例跟踪中查不到对应 desktop app ID 时输出警告并立即返回，不阻止其他初始化。
+当前没有据此添加包、伪造 desktop 条目、修改 BusName 或增加启动 timeout。
+
+新采集器正确返回了串口 BEGIN/END 1–19：1–9 和诊断命令 19 退出 0，10–18 为
+有界退出 124，串口恢复成功。共七次完整、九次不完整 session 样本，没有 ready=true。
+Treeland 实际监听 `/run/treeland/wayland-1`；用户 runtime 目录内没有 socket 只是
+诊断字段，不是桌面通过门禁，也不能单独推断 compositor 失败。
+
+宿主 KVM 快照确认了设备权限变化：
+
+| UTC 时间 | 阶段 | UID 1001 的命名 ACL | 打开设备 |
+| --- | --- | --- | --- |
+| 11:19:47.543 | probe 前 | `user:1001:rw-` | 成功 |
+| 11:19:48.164 | probe 后 | 消失 | EACCES / errno 13 |
+| 11:19:50.526 | 真实 VM 启动前 | 缺失 | EACCES / errno 13 |
+| 11:19:50.627 | 启动失败后 | 缺失 | EACCES / errno 13 |
+
+四次均为同一 PID 3144、UID/EUID/GID 1001 和相同附加组、安全状态；设备 inode、
+root:GID 993、0660 模式不变，ACL 与 ctime 发生变化。因此“探测期间访问授权丢失”
+是实际结论，具体修改者没有宿主 udev audit 可直接证明。
+
+源码提供吻合的机制：[Linux KVM](https://github.com/torvalds/linux/blob/v6.8/virt/kvm/kvm_main.c)
+在创建/销毁 VM 时发送设备 CHANGE 事件；systemd 的
+[uaccess 规则](https://github.com/systemd/systemd/blob/v255/rules.d/70-uaccess.rules.in)、
+[seat 规则](https://github.com/systemd/systemd/blob/v255/rules.d/73-seat-late.rules.in) 和
+[uaccess 实现](https://github.com/systemd/systemd/blob/v255/src/udev/udev-builtin-uaccess.c)
+可能在没有活动 seat 用户时清除命名用户 ACL。这是源码支持的解释，未替代本次
+宿主修改者的直接记录。
+
+下一轮宿主修复采用现有设备的 `kvm` 组访问：仅在字符设备与已核验组 GID 相符时
+为临时 runner 增加组成员资格，由同一非 root UID 启动具备新附加组的控制器。
+启动门禁核对 UID/GID、附加组和实际 open；现有 probe 前后快照继续验证访问是否稳定。
+不改变桌面启动时限、ISO 字节或安装验收条件。组授权与实际 KVM 运行效果仍待下一轮证明。
 
 每组先真实启动 ISO，经 DDM 登录并验收桌面，执行实际安装后端的
 `preflight → partition → copy → system → ready → configure → finalize`。
