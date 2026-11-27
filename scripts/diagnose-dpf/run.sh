@@ -59,19 +59,51 @@ ctest --test-dir "$probe_output_dir/build" --output-on-failure -V \
   2>&1 | tee "$probe_output_dir/probe-test.log"
 probe_status=${PIPESTATUS[0]}
 set -e
-python3 - "$probe_output_dir/result.json" "$probe_status" <<'PY'
-import json
-import os
-import sys
+# The installed shared framework already exports this symbol. Rebuild only the
+# probe plugins with an external declaration, so they cannot define local copies.
+# This tests the proposed ownership change without replacing any installed RPM.
+probe_fixed_dir="$probe_output_dir/header-fixed"
+mkdir -p "$probe_fixed_dir"
+python3 - "$probe_fixed_dir/include" <<'PY'
+import difflib
 from pathlib import Path
-Path(sys.argv[1]).write_text(json.dumps({
-    "schema": 1,
-    "scope": "Existing packaged DPF: nested QPluginLoader, event lookup and QVariant transfer",
-    "source_commit": os.environ.get("GITHUB_SHA"),
-    "run_id": os.environ.get("GITHUB_RUN_ID"),
-    "ctest_exit_status": int(sys.argv[2]),
-    "desktop_verified": False,
-    "packaged_libraries_patched": False,
-}, indent=2) + "\n")
+import shutil
+import sys
+root = Path(sys.argv[1])
+shutil.copytree('/usr/include/dfm-framework', root / 'dfm-framework')
+header = root / 'dfm-framework/event/eventhelper.h'
+before = header.read_text()
+old = '    static inline EventConverterFunc convertFunc {};'
+new = '    static EventConverterFunc convertFunc;'
+if before.count(old) != 1:
+    raise SystemExit('Installed DPF header differs from the reviewed source')
+after = before.replace(old, new)
+header.write_text(after)
+(root.parent / 'header-change.diff').write_text(''.join(difflib.unified_diff(
+    before.splitlines(True), after.splitlines(True),
+    fromfile='installed/eventhelper.h', tofile='candidate/eventhelper.h')))
 PY
-exit "$probe_status"
+cp "$probe_source_dir/0001-dpf-centralize-event-converter.patch" "$probe_fixed_dir/"
+cmake -S "$probe_source_dir" -B "$probe_fixed_dir/build" -GNinja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+  -DDFM_FRAMEWORK_INCLUDE_DIR:PATH="$probe_fixed_dir/include" \
+  -DCMAKE_CXX_FLAGS_RELEASE:STRING=-DNDEBUG \
+  -DCMAKE_CXX_FLAGS:STRING="$probe_cxx_flags" \
+  -DCMAKE_MODULE_LINKER_FLAGS:STRING="$probe_linker_flags" \
+  -DCMAKE_EXE_LINKER_FLAGS:STRING="$probe_linker_flags" \
+  2>&1 | tee "$probe_fixed_dir/cmake-configure.log"
+cmake --build "$probe_fixed_dir/build" --parallel 2 --verbose \
+  2>&1 | tee "$probe_fixed_dir/cmake-build.log"
+for probe_plugin in outer inner; do
+  readelf --wide --syms "$probe_fixed_dir/build/dpf-probe-$probe_plugin.so" \
+    > "$probe_fixed_dir/probe-$probe_plugin.symbols.txt"
+done
+sha256sum --check "$probe_output_dir/$(basename -- "$probe_framework").sha256"
+set +e
+ctest --test-dir "$probe_fixed_dir/build" --output-on-failure -V \
+  2>&1 | tee "$probe_fixed_dir/probe-test.log"
+probe_fixed_status=${PIPESTATUS[0]}
+set -e
+python3 "$probe_source_dir/check-comparison.py" \
+  "$probe_output_dir" "$probe_status" "$probe_fixed_status"

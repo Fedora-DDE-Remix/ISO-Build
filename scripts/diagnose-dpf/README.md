@@ -20,9 +20,20 @@ In the same prepared environment, from the repository root:
 bash scripts/diagnose-dpf/run.sh artifacts/dpf
 ```
 
-Run against the existing RPM first, then against a candidate build. A successful
-probe proves this limited DPF path works; it does not replace a real visible
-desktop login and crash-free VM gate. On failure retain the printed registry ID,
-converted ID, callback validity/address, and QVariant validity before choosing
-a source patch. The script also saves the complete installed-library symbol
-tables and disassembly, compiler/RPM flags, build commands, and test output.
+The script first reproduces the observed failure using the unchanged packaged
+headers. It then copies those headers into the artifact directory and changes
+only the inline callback definition to an external declaration. Recompiled probe
+plugins still link to the unchanged installed framework, which already exports
+that symbol. A comparison passes only when the baseline shows different callback
+addresses and a failed conversion despite successful registration, while the
+candidate shares the callback and passes integer/list transfers. Both test logs,
+return codes and original-library checksums remain in the evidence.
+
+The accompanying two-file source patch defines the callback exactly once in the
+framework. Production use requires rebuilding all DFM plugins with the patched
+header; replacing only the framework RPM leaves old plugin definitions in place.
+The diagnostic does not build this complete replacement package. Its result
+explicitly records `full_source_patch_built: false` and `desktop_verified: false`.
+A successful probe does not replace a visible desktop login and crash-free VM
+gate. The script also saves the installed-library symbol tables and disassembly,
+compiler/RPM flags, build commands, and test output.
