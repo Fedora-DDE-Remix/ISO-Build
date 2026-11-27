@@ -16,8 +16,10 @@
 mount namespace，详见[第三候选记录](VALIDATION-45.20261127.3.md)。当前 `.4` 使用
 安装器 `0.3.0-0.3`，在整个安装会话开始时隔离挂载；现有和后启动服务隔离已通过
 [真实内核回归](https://github.com/Fedora-DDE-Remix/fedora-dde-installer/actions/runs/46001067422)。
-新 ISO 的 compose、加密关闭、硬盘启动与九组布局仍需本轮独立验收，见
-[第四候选报告](VALIDATION-45.20261127.4.md)。
+新 ISO 的 compose 和 16 GB UEFI/LUKS2/Btrfs 真实安装已通过，包含正常关闭加密
+映射、移除 ISO 后输入口令启动、Enforcing 和实际桌面。其余布局继续验收；其中
+XFS 根、独立 home/swap 一组在 VM 启动前遇到控制器退出状态回归失败，修正测试
+观察方式后使用同一镜像补测，见[第四候选报告](VALIDATION-45.20261127.4.md)。
 
 **本系列候选保持 SELinux Enforcing**：Live 和安装目标使用 Fedora 原生 PAM，
 系统配置为 `SELINUX=enforcing`。Live 启动参数显式包含 `selinux=1 enforcing=1`；

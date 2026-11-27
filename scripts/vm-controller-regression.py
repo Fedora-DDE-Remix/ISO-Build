@@ -53,27 +53,79 @@ class ControllerRegression(unittest.TestCase):
         return {"probe_complete": False, "ready": False, "crash_check_complete": False,
                 "dde_shell_crashes": None, "probe_errors": [{"stage": "sessions", "kind": "timeout"}]}
 
-    def assert_process_exited(self, pid):
-        try:
-            state = Path(f"/proc/{pid}/stat").read_text()
-        except OSError as error:
-            # Linux may reap the process after opening its procfs stat file.
-            # Both a missing path and ESRCH establish that it has exited.
-            if error.errno in {errno.ENOENT, errno.ESRCH}:
-                return
-            raise
-        self.assertEqual(state.split(") ", 1)[1].split()[0], "Z")
+    def assert_process_exited(self, process, timeout=3):
+        # timeout can die before every SIGKILL recipient has finished exiting.
+        # Match the identity recorded before the timeout, not a reused PID.
+        pid, starttime = process["pid"], process["starttime"]
+        self.assertTrue(type(pid) is int and pid > 0 and type(starttime) is int and starttime > 0,
+                        "The fixture did not record a valid process identity before timeout")
+        began = time.monotonic()
+        deadline = began + timeout
+        observed = []
+        while True:
+            try:
+                fields = Path(f"/proc/{pid}/stat").read_text().rpartition(") ")[2].split()
+            except OSError as error:
+                # Linux can reap a process after opening its procfs stat file.
+                if error.errno not in {errno.ENOENT, errno.ESRCH}:
+                    raise
+                reason = "reaped"
+                break
+            state, current_starttime = fields[0], int(fields[19])
+            self.assertGreater(current_starttime, 0, "Cannot verify the observed process starttime")
+            if not observed or observed[-1] != state:
+                observed.append(state)
+            if current_starttime != starttime:
+                reason = "pid-reused"
+                break
+            if state in {"Z", "X"}:
+                reason = "terminated"
+                break
+            remaining = deadline - time.monotonic()
+            self.assertGreater(remaining, 0,
+                               f"Process {pid} (starttime {starttime}) remained alive after "
+                               f"{timeout}s; observed states: {observed}")
+            time.sleep(min(0.02, remaining))
+        return dict(process, exit_observed=reason, states=observed,
+                    elapsed_seconds=round(time.monotonic() - began, 4))
+
+    @staticmethod
+    def process_stat_fixture(state, starttime):
+        # Fields after the final ')' start at state (3); starttime is field 22.
+        return "123 (test ) process) " + " ".join([state, *(["0"] * 18), str(starttime)])
 
     def test_reaped_process_race_accepts_only_missing_process_errors(self):
+        process = {"pid": 123, "starttime": 456}
         for number in (errno.ENOENT, errno.ESRCH):
             with self.subTest(errno=number), mock.patch.object(Path, "read_text", side_effect=OSError(number, "reaped")):
-                self.assert_process_exited(123)
+                self.assert_process_exited(process)
         with mock.patch.object(Path, "read_text", side_effect=PermissionError(errno.EACCES, "denied")):
             with self.assertRaises(PermissionError):
-                self.assert_process_exited(123)
-        with mock.patch.object(Path, "read_text", return_value="123 (still running) R 1 2 3"):
-            with self.assertRaises(AssertionError):
-                self.assert_process_exited(123)
+                self.assert_process_exited(process)
+        for state in ("R", "S", "D", "T"):
+            with self.subTest(state=state), mock.patch.object(
+                    Path, "read_text", return_value=self.process_stat_fixture(state, 456)):
+                with self.assertRaisesRegex(AssertionError, "remained alive"):
+                    self.assert_process_exited(process, timeout=0)
+
+    def test_exit_polling_waits_for_the_original_process_to_terminate(self):
+        process = {"pid": 123, "starttime": 456}
+        for final in ("Z", "X"):
+            samples = [self.process_stat_fixture(state, 456) for state in ("R", "R", final)]
+            with self.subTest(final=final), mock.patch.object(Path, "read_text", side_effect=samples), \
+                    mock.patch.object(time, "sleep") as sleep:
+                result = self.assert_process_exited(process)
+                self.assertEqual(result["exit_observed"], "terminated")
+                self.assertEqual(result["states"], ["R", final])
+                self.assertEqual(sleep.call_count, 2)
+
+    def test_exit_polling_distinguishes_pid_reuse_from_a_live_original(self):
+        with mock.patch.object(Path, "read_text", return_value=self.process_stat_fixture("R", 789)):
+            result = self.assert_process_exited({"pid": 123, "starttime": 456}, timeout=0)
+        self.assertEqual(result["exit_observed"], "pid-reused")
+        starttime = int(Path(f"/proc/{os.getpid()}/stat").read_text().rpartition(") ")[2].split()[19])
+        with self.assertRaisesRegex(AssertionError, "remained alive"):
+            self.assert_process_exited({"pid": os.getpid(), "starttime": starttime}, timeout=0.05)
 
     def test_soft_hard_and_transport_budgets_fit_existing_outer_limit(self):
         for duration in (8.5, 12, 45, 60):
@@ -100,7 +152,9 @@ class ControllerRegression(unittest.TestCase):
                   "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
                   "child=subprocess.Popen([sys.executable,'-c',"
                   "'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)',sys.argv[1]]); "
-                  "pathlib.Path(sys.argv[1]).write_text(json.dumps({'helper':os.getpid(),'child':child.pid})); "
+                  "identity=lambda pid:{'pid':pid,'starttime':int(pathlib.Path('/proc/'+str(pid)+'/stat')"
+                  ".read_text().rpartition(') ')[2].split()[19])}; "
+                  "pathlib.Path(sys.argv[1]).write_text(json.dumps({'helper':identity(os.getpid()),'child':identity(child.pid)})); "
                   "print('VMTEST_PROBE_STAGE=hanging-child',flush=True); time.sleep(60)")
         argv, limits = CONTROLLER.session_probe_command([sys.executable, "-c", source, str(pid_file)], 8.5)
         try:
@@ -108,14 +162,18 @@ class ControllerRegression(unittest.TestCase):
             self.assertEqual(status, 137)
             self.assertIn("VMTEST_PROBE_STAGE=hanging-child", body)
             self.assertEqual(guest.run("printf after-timeout", "after-timeout", timeout=3), (0, "after-timeout\n"))
-            for pid in json.loads(pid_file.read_text()).values():
-                self.assert_process_exited(pid)
+            exited = {name: self.assert_process_exited(process)
+                      for name, process in json.loads(pid_file.read_text()).items()}
+            print("VM_TIMEOUT_EXIT_OBSERVATIONS=" + json.dumps(exited, sort_keys=True), flush=True)
         finally:
             # Clean only children carrying this temporary test's unique path.
             if pid_file.exists():
-                for pid in json.loads(pid_file.read_text()).values():
+                for process in json.loads(pid_file.read_text()).values():
+                    pid = process["pid"]
                     with contextlib.suppress(OSError):
-                        if str(pid_file).encode() in Path(f"/proc/{pid}/cmdline").read_bytes():
+                        fields = Path(f"/proc/{pid}/stat").read_text().rpartition(") ")[2].split()
+                        if (int(fields[19]) == process["starttime"]
+                                and str(pid_file).encode() in Path(f"/proc/{pid}/cmdline").read_bytes()):
                             os.kill(pid, signal.SIGKILL)
             parent.close()
             if shell.poll() is None:
