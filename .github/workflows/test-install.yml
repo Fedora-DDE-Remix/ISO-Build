@@ -1,12 +1,6 @@
 name: Test ISO installation
 
 on:
-  push:
-    branches: [validate-iso4-20261127]
-    paths:
-      - '.github/workflows/test-install.yml'
-      - 'scripts/vm-retest.json'
-      - 'scripts/vm-controller-regression.py'
   workflow_call:
     inputs:
       iso-run-id:

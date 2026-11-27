@@ -4,9 +4,14 @@
 
 本候选将安装器升级到 `0.3.0-0.3`，修复 `.3` 实际加密安装结束时无法关闭 LUKS
 映射的问题。新的真实内核隔离回归、Fedora 45 原生 RPM 构建与本候选 ISO compose
-已经通过；16 GB 加密 canary 的完整安装、正常关闭映射、硬盘启动和桌面也已通过。
-其余矩阵继续验收，XFS/home/swap 场景的前置控制器回归失败另行保留并同镜像补测。
-这里不以单元测试、源码修复或上一镜像的桌面结果替代本轮验收。
+已经通过；同一镜像的九个后端驱动真实安装场景，现均已完成正常收尾、无 ISO
+硬盘启动和真实 DDM 图形登录。九份实际 VM 报告与证据 ZIP 已下载并核验，详见
+[最终机器可读汇总](validation/45.20261127.4-results.json)。
+
+原 run `46002723335` 的总体状态仍是 failure：其中八个实际 VM 场景通过，
+XFS/home/swap 一组在启动 VM 前的 host 回归夹具处失败。只修正该夹具后，使用
+同一份 ISO 在 run `46008724244` 完成第九组；原失败没有被改写为成功。本报告
+区分 ISO 构建、测试控制代码和最终文档提交，不用其他镜像或单元测试替代实际验收。
 
 ## 已确认的前版失败与修复
 
@@ -34,6 +39,7 @@ VM 控制器先完成原有 Live 桌面与 PAM 验证，再让已经通过普通
 | --- | --- |
 | 系统 | Fedora 45 / x86_64，普通可写 RPM / DNF 系统 |
 | ISO / 配置 RPM 版本 | `45.20261127.4` |
+| ISO 构建源码 | `ec9903e1addf5e487f468680c6af4e34ce6bf873`，compose run `46002723335` |
 | 安装器源码 | `bd06acc59908771c726b907d65c92bc84b9f807d` |
 | 安装器 tree | `5e637e59b7cee183526f76d51972a96834d257f7`，503 个源文件已完整核对 |
 | 安装器版本 | `0.3.0-0.3` |
@@ -44,12 +50,16 @@ VM 控制器先完成原有 Live 桌面与 PAM 验证，再让已经通过普通
 | DFM 临时四个运行包 | `6.6.7-9.1.remix1.fc45`，继续使用已核验 schema 2 输入 |
 | desktop-base / schemas | 继续使用固定源码、补丁与严格检查的临时重建 |
 | 安全配置 | SELinux Enforcing，Fedora 原生 PAM，已启用 COPR 及签名/TLS 检查 |
+| XFS/home/swap 补测控制代码 | `7c80ee0f6176fdb708bd1296afba157988f12670`，retest run `46008724244`；不是 ISO 构建来源 |
 
 `.3` 专用的临时 push 复测入口只保留在当时的提交中。本候选使用完整的
 `compose → 小盘加密 canary → 其余八组` 自动链，以及带显式 ISO run/artifact
-参数的 workflow_call / workflow_dispatch。本次前置回归修正的补测入口仅允许
-`validate-iso4-20261127` 分支，固定本候选原 ISO 的 commit、run、artifact 与
-原文件 SHA-256，只选择 `uefi-xfs-home-swap`；不会重新 compose 或复测旧 `.3`。
+参数的 workflow_call / workflow_dispatch。本次补测曾通过仅允许
+`validate-iso4-20261127` 分支的临时 push 入口，固定原 ISO 的 commit、run、artifact
+与原文件 SHA-256，只选择 `uefi-xfs-home-swap`。该自动 push 入口现已停用，常规
+入口保留 workflow_call / workflow_dispatch。补测和之后的汇总、文档提交都没有
+重新 compose；已测 ISO 的构建来源始终是 `ec9903e1…`，不是 `7c80ee0f…` 或最终
+文档提交。
 
 ## 实际 ISO compose
 
@@ -120,23 +130,36 @@ DDE 策略包。只读核对实际
 “所有域均已逐一验证 enforcing”的额外声明。本候选实际选择 `enforcing` 安装
 profile，镜像检查拒绝禁用 SELinux 的启动参数。
 
+Enforcing 不等于没有 AVC。实际 Live 日志保留了 `kmscon_t` 对 `tmpfs_t`
+文件系统的 `getattr` 拒绝，`permissive=0`。例如 XFS/home/swap
+[补测 job 140538520123](https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/46008724244/job/140538520123)
+的 `live/diagnostics.json → avc` 保存 22 条此类记录，发生于首次 Live 图形登录
+阶段、进入安装 namespace 之前；该次 installed 采集返回零条 AVC。这里仅说明
+已保存的采集结果，不声称全部场景全程零 AVC，也不从该日志推断具体 tmpfs 挂载点。
+
 ## 本轮真实 VM 矩阵
 
-所有场景均使用同一实际 ISO、x86_64、单块 VirtIO 磁盘和 512 字节扇区。
+所有场景均使用同一实际 ISO、x86_64、4 vCPU、8 GiB RAM、实际 KVM 加速，
+单块 VirtIO 磁盘和 512 字节扇区。
 UEFI 为未启用 Secure Boot 的 OVMF，BIOS 为 SeaBIOS；各场景有独立 2 GiB ext4
 `/boot`，UEFI ESP 为 600 MiB。小盘是十进制 16,000,000,000 字节。
+8 GiB 是本轮测试配置，没有据此给出经过验证的最低内存要求。
+
+[最终汇总 JSON](validation/45.20261127.4-results.json) 逐组记录 run/job/artifact、
+ZIP 与报告 SHA-256、ISO 身份及验收字段。八组来自原 run `46002723335`，
+`uefi-xfs-home-swap` 来自同镜像补测 `46008724244`。
 
 | 场景 | 根与数据布局 | 状态 |
 | --- | --- | --- |
-| `uefi-luks-btrfs-small` | 16 GB，GPT，LUKS2 内 Btrfs root/home | 实际安装及无 ISO 硬盘启动通过 |
-| `uefi-btrfs` | 64 GiB，GPT，Btrfs root/home | 已展开，结果待核验 |
-| `bios-ext4` | 64 GiB，GPT，ext4，2 MiB BIOS boot | 已展开，结果待核验 |
-| `bios-mbr-ext4` | 64 GiB，MBR，ext4 | 已展开，结果待核验 |
-| `uefi-xfs-home-swap` | 64 GiB，GPT，XFS 根、ext4 home、2 GiB swap | VM 前回归失败；修正观察后补测 |
-| `uefi-preserve` | 64 GiB，GPT，新 Btrfs 根，保留 home 和 ESP | 已展开，结果待核验 |
-| `uefi-small` | 16 GB，GPT，Btrfs root/home | 已展开，结果待核验 |
-| `bios-luks-ext4` | BIOS/GPT，64 GiB，LUKS2 内 ext4 | 已展开，结果待核验 |
-| `uefi-luks-xfs` | 64 GiB，GPT，LUKS2 内 XFS | 已展开，结果待核验 |
+| `uefi-luks-btrfs-small` | 16 GB，GPT，LUKS2 内 Btrfs root/home | 正常关闭映射、硬盘解锁启动和图形登录通过 |
+| `uefi-btrfs` | 64 GiB，GPT，Btrfs root/home | 实际安装、硬盘启动和图形登录通过 |
+| `bios-ext4` | 64 GiB，GPT，ext4，2 MiB BIOS boot | 实际安装、GPT 硬盘启动和图形登录通过 |
+| `bios-mbr-ext4` | 64 GiB，MBR，ext4 | 实际安装、MBR 硬盘启动和图形登录通过 |
+| `uefi-xfs-home-swap` | 64 GiB，GPT，XFS 根、ext4 home、2 GiB swap | 原 VM 前失败保留；同镜像补测完整通过 |
+| `uefi-preserve` | 64 GiB，GPT，新 Btrfs 根，保留 home 和 ESP | 硬盘启动、图形登录及保留内容检查通过 |
+| `uefi-small` | 16 GB，GPT，Btrfs root/home | 小盘完整安装、硬盘启动和图形登录通过 |
+| `bios-luks-ext4` | BIOS/GPT，64 GiB，LUKS2 内 ext4 | 正常关闭映射、硬盘解锁启动和图形登录通过 |
+| `uefi-luks-xfs` | 64 GiB，GPT，LUKS2 内 XFS | 正常关闭映射、硬盘解锁启动和图形登录通过 |
 
 ### 16 GB 加密 canary 的实际证据
 
@@ -164,6 +187,30 @@ UEFI 为未启用 Secure Boot 的 OVMF，BIOS 为 SeaBIOS；各场景有独立 2
   安装器快捷方式。一次预览显示差异已通过原 PNG 对应区域的逐像素一致比较排除，
   没有据此修改桌面包。桌面服务 active、2 项图标已加载，未记录 coredump。
 
+### 其他布局增加的实际覆盖
+
+- BIOS GPT 与 MBR 的分区日志分别记录 `mklabel gpt` 和 `mklabel msdos`；随后
+  无 ISO 的磁盘启动内核参数分别来自 `(hd0,gpt2)` 与 `(hd0,msdos1)`，实际根 UUID
+  与安装结果一致。没有仅依据预定分区计划声称两种启动方式通过。
+- 两个未加密 Btrfs 场景的 `/` 与 `/home` 实际使用同一 UUID 的 root/home 子卷，
+  均有 `compress=zstd:1`。16 GB 未加密安装也完整通过；安装后 `lsblk` 显示约
+  `8.5G` 可用空间。各场景的运行诊断均观察到启用的 zram。
+- BIOS 加密 ext4 和 UEFI 加密 XFS 都在普通 finalize 后关闭 mapper，再通过
+  硬盘启动时的交互口令解锁。`/home` 是同一加密根内的目录，未落到明文独立分区。
+  两组都验证 LUKS2、Argon2id、一个 keyslot、crypttab 的 `none` 密钥文件字段。
+- 保留场景在磁盘启动后逐项比较原 home 和 ESP 的文件系统 UUID、PARTUUID、
+  起止扇区，以及各自 256 字节随机 marker 的 SHA-256，全部一致。新系统正确挂载
+  保留的 ext4 `/home`；ESP 中无关厂商目录的测试文件也保留。该测试没有比较
+  安装前后的 UID/GID、mode、ACL 或 xattrs，不能扩大为这些属性已全部实测不变。
+
+最后完成的 UEFI 加密 XFS
+[job 140533252835](https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/46002723335/job/140533252835)
+为 success；[artifact 15203771377](https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/46002723335/artifacts/15203771377)
+实际 ZIP 9,899,924 字节，SHA-256
+`2709fa07f349fede777cb9defaf5e27938639f5f0e1079b371ca2560a95980bc`。
+安装后根与 home 均位于 `luks-814c1b9f-aae2-49cf-b361-df9f1ada8a12`，XFS UUID
+为 `0499308b-d1e3-4fcf-9bb4-8cdc6b017dd4`；明文 ext4 `/boot` 和 FAT ESP 独立挂载。
+
 ### XFS/home/swap 的前置回归失败及补测
 
 [原 job 140533252729](https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/46002723335/job/140533252729)
@@ -179,19 +226,36 @@ UEFI 为未启用 Secure Boot 的 OVMF，BIOS 为 SeaBIOS；各场景有独立 2
 只有已消失、`ENOENT/ESRCH`、`Z/X` 或 PID 身份已变化才通过。原身份持续存活仍失败，
 权限错误仍失败，137/串口 END/后续命令断言不变；cleanup 也核对原进程身份和唯一
 临时路径。4 项针对性验证通过，含一次真实 timeout。生产控制器、安装器、ISO、
-桌面等待时间及验收规则均未改变。同一原 ISO 的该场景补测尚待实际结果。
+桌面等待时间及验收规则均未改变。
 
-真实验收必须包含正常 finalize、移除 ISO 后启动、账户与根 UUID、普通可写根、
-Enforcing、Fedora PAM、默认 COPR 及完整桌面。加密场景还要真实拒绝错误口令，
-保存无目标 keyfile 的配置，并通过硬盘启动时的 initramfs 口令解锁。
+[补测 run 46008724244 / job 140538520123](https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/46008724244/job/140538520123)
+现已成功：58 项 host 回归通过，随后 22 个实际 VM 阶段全部通过。
+[Artifact 15203276917](https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/46008724244/artifacts/15203276917)
+实际 ZIP 9,921,189 字节，独立核验 SHA-256
+`9553ba4abbf022851537c7b5d075b4dc2dc450e0a4f3ce2d92aa01f015362066`。
+报告确认仍是上表 `94009516…` 的同一 ISO，`iso_unchanged=true`；安装后 XFS 根
+实际挂载于 `/dev/vda3`，独立 ext4 home 为 `/dev/vda4`，`/dev/vda5` 的磁盘 swap
+与 `/dev/zram0` 同时启用。正常 finalize、无 ISO 磁盘启动、新 boot ID、用户与根
+UUID、Enforcing、PAM、COPR、Live 与安装后图形登录均通过。原 run 的总体 failure
+及其 host 失败 artifact 继续保留，不用这个独立成功结果改写历史。
 
-这仍是后端驱动的真实安装和图形登录测试，`graphical_layout_planner_tested=false`；
+上述九组实际验收包含正常 finalize、移除 ISO 后启动、账户与根 UUID、普通可写根、
+Enforcing、Fedora PAM、默认 COPR、真实 DDM 会话与稳定桌面画面。三个加密场景
+还在重启前实际拒绝错误口令，保存无目标 keyfile 的配置，并通过硬盘启动时的
+initramfs 交互口令解锁。
+
+以上九组均为后端驱动的真实安装和图形登录测试，`graphical_layout_planner_tested=false`；
+生产流程确实在同一次 Live 启动内经过 ready、用户配置和 finalize，再由测试主动
+关机切换到硬盘启动；这不等于安装 GUI 的每一页已经逐项点选验收。
 没有宣称 GUI 全流程点选、Secure Boot、实体硬件、aarch64、4Kn、多磁盘、所有布局
 排列组合、实际 rescue 启动或内核升级后启动已通过。14 GiB 设备初筛及 12 GiB
 内层根下限不是所有未来 payload 的容量承诺，实际空间检查和本轮小盘结果才是依据。
 
 ## 发布门槛
 
-当前仍为独立候选。完整证据可审阅后，再处理主分支合并和正式 Release。
+九组实际安装验收已完成，当前仍为独立候选，正式 Release 尚未发布。完整证据
+供最终审阅；主分支合并和正式 Release 仍需相应批准，已有成功结果不代替这些门槛。
 桌面维护仓库的 [18 份 SPEC 修复 PR](https://github.com/Fedora-DDE-Remix/Deepin-Desktop-Environment/pull/1)
-独立保留，未触发 COPR 构建；维护者自测范围和已验证部分写在对应审查记录中。
+独立保留，未触发 COPR 构建；新增维护者 EVR 尚未完成其 COPR 构建验收。本 ISO
+验证的是固定发布包及这里列出的临时重建版本，不能将其当作 18 份新 SPEC 版本
+全部构建成功。维护者自测范围和已验证部分写在对应审查记录中。

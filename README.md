@@ -16,16 +16,27 @@
 mount namespace，详见[第三候选记录](VALIDATION-45.20261127.3.md)。当前 `.4` 使用
 安装器 `0.3.0-0.3`，在整个安装会话开始时隔离挂载；现有和后启动服务隔离已通过
 [真实内核回归](https://github.com/Fedora-DDE-Remix/fedora-dde-installer/actions/runs/46001067422)。
-新 ISO 的 compose 和 16 GB UEFI/LUKS2/Btrfs 真实安装已通过，包含正常关闭加密
-映射、移除 ISO 后输入口令启动、Enforcing 和实际桌面。其余布局继续验收；其中
-XFS 根、独立 home/swap 一组在 VM 启动前遇到控制器退出状态回归失败，修正测试
-观察方式后使用同一镜像补测，见[第四候选报告](VALIDATION-45.20261127.4.md)。
+新 ISO compose 和下列九个后端驱动真实安装、无 ISO 硬盘启动及 DDM 图形登录
+场景现已全部通过，包括三个 LUKS2 场景的正常关闭映射和交互口令启动。原 run
+`46002723335` 仍保留总体 failure：其中八个 VM 通过，XFS 根、独立 home/swap
+一组在启动 VM 前的 host 回归夹具处失败。仅修正夹具观察方式后，该组使用同一
+镜像在 run `46008724244` 完整通过，见[第四候选报告](VALIDATION-45.20261127.4.md)
+和[九组证据汇总](validation/45.20261127.4-results.json)。这不是安装 GUI 全页
+点选测试，也不改写原失败记录。
+
+已测 ISO 的构建提交始终是 `ec9903e1addf5e487f468680c6af4e34ce6bf873`，原文件
+SHA-256 为 `94009516d1751403a77bb24252ff097f3a85943d87430f11b5b2dd0dc808274a`。
+补测代码 `7c80ee0f6176fdb708bd1296afba157988f12670` 和之后的证据、文档提交不是
+这个 ISO 的构建来源；补测没有重建或改写镜像。
 
 **本系列候选保持 SELinux Enforcing**：Live 和安装目标使用 Fedora 原生 PAM，
 系统配置为 `SELINUX=enforcing`。Live 启动参数显式包含 `selinux=1 enforcing=1`；
 安装器为目标系统生成正常磁盘引导参数，使用 Fedora 默认的 Enforcing 行为。
 镜像使用维护者发布的 DDM 和 DDE SELinux 策略包，构建时验证策略注册和文件标签。
-正式交付还需要通过下面的实际虚拟机安装检查；仅生成 ISO 不代表安装验证通过。
+本候选已完成下面列出的实际 VM 安装检查；仅生成 ISO 不代表安装验证通过。
+运行检查没有枚举编译策略中的全部 permissive 类型，因此不宣称每个域都逐一通过
+该项验证。Live 日志还保留了 `kmscon_t` 对 `tmpfs_t` 的 enforcing AVC，具体采集
+范围见验证报告；没有以关闭 SELinux 处理，也不声称全程零 AVC。
 
 此版在 ISO 配置 RPM 中加入 DDM 的 `kmsconvt@tty1.service` 启动顺序和冲突声明。
 Fedora 45 的新 VT 控制台使用该单元，DDM 上游 0.5.0 原单元仅处理传统
@@ -58,6 +69,8 @@ DNF 即使跳过缺失的组包并返回成功，也不能绕过这项检查。
 本工作流不写入 COPR。经后续追加的 SPEC 修复要求，维护仓库的已确认问题另通过
 [独立修复 PR](https://github.com/Fedora-DDE-Remix/Deepin-Desktop-Environment/pull/1)
 提交，保留主分支供维护者审阅合并，COPR 构建由维护者自测。
+其中 18 份 SPEC 的新增维护者 EVR 尚未完成 COPR 构建验收；本候选临时包的成功
+验证不代表这些新版本已全部构建通过。
 本次独立 DFM 临时包重建的原因、固定输入和验收边界见
 [桌面插件故障与临时补丁报告](DDE-HOTFIX-20261127.md)。
 
@@ -81,8 +94,8 @@ root/home 子卷，ext4/XFS 的 home 是根内目录。开机交互输入口令�
 
 口令使用匿名 sealed memfd 传递，crypttab 使用 `none` 密钥文件字段，目标系统
 不存放自动解锁密钥。小盘检查额外扣除 32 MiB 加密头，再应用原有 12 GiB 内层根
-下限和 payload 实际占用。下面新增的加密场景必须有新镜像实测报告，不能沿用旧版
-未加密安装报告。每次构建先运行 16 GB 加密 Btrfs 场景，成功后才运行其余八组。
+下限和 payload 实际占用。`.4` 的三个加密场景已有该镜像的真实安装与硬盘解锁
+启动报告；每次构建仍先运行 16 GB 加密 Btrfs 场景，成功后才运行其余八组。
 
 ### 默认壁纸与 Remix 标识
 
@@ -149,29 +162,40 @@ SHA-256，使用 OVMF UEFI 或 SeaBIOS、独立 sparse qcow2、QEMU 的本地 UN
    崩溃记录，并检查会话及非黑画面持续存在至少 8 秒。保存截图供人工核验；
    仅有 Treeland / DDE Shell 进程不能证明桌面成功，非黑画面本身也不证明全部桌面功能正常。
 
-测试覆盖以下组合，所有场景都必须安装后移除 ISO 并从磁盘启动：
+`.4` 以下九组已完成真实安装、移除 ISO 后的磁盘启动和图形登录。每组实际使用
+4 vCPU、8 GiB RAM 和 KVM；这是本轮测试资源，不是经过验证的最低内存要求。
 
-| 场景 | 固件 | 文件系统与布局 | 虚拟磁盘 |
-| --- | --- | --- | --- |
-| `uefi-btrfs` | UEFI | 默认 Btrfs root/home 子卷、独立 `/boot`、ESP | 64 GiB |
-| `bios-ext4` | BIOS | ext4 根分区、独立 `/boot`、GPT BIOS boot 区 | 64 GiB |
-| `bios-mbr-ext4` | BIOS | MBR 分区表、ext4 根分区、独立 `/boot` | 64 GiB |
-| `uefi-xfs-home-swap` | UEFI | XFS 根分区、独立 `/home`、磁盘 swap、`/boot`、ESP | 64 GiB |
-| `uefi-preserve` | UEFI | 保留已有分区及验证文件，在剩余空间安装 | 64 GiB |
-| `uefi-small` | UEFI | 默认 Btrfs 布局的小容量完整安装 | 16 GB（十进制） |
-| `uefi-luks-btrfs-small` | UEFI | LUKS2 内 Btrfs root/home，明文 `/boot` 和 ESP | 16 GB（十进制） |
-| `bios-luks-ext4` | BIOS | GPT、LUKS2 内 ext4 根与 home，明文 `/boot` | 64 GiB |
-| `uefi-luks-xfs` | UEFI | LUKS2 内 XFS 根与 home，明文 `/boot` 和 ESP | 64 GiB |
+| 场景 | 固件 | 文件系统与布局 | 虚拟磁盘 | `.4` 最终结果 |
+| --- | --- | --- | --- | --- |
+| `uefi-btrfs` | UEFI | 默认 Btrfs root/home 子卷、独立 `/boot`、ESP | 64 GiB | 通过 |
+| `bios-ext4` | BIOS | ext4 根分区、独立 `/boot`、GPT BIOS boot 区 | 64 GiB | 通过 |
+| `bios-mbr-ext4` | BIOS | MBR 分区表、ext4 根分区、独立 `/boot` | 64 GiB | 通过 |
+| `uefi-xfs-home-swap` | UEFI | XFS 根分区、独立 `/home`、磁盘 swap、`/boot`、ESP | 64 GiB | 同镜像补测通过；原 host 失败保留 |
+| `uefi-preserve` | UEFI | 保留已有 home、ESP 及验证文件，在剩余空间安装 | 64 GiB | 通过 |
+| `uefi-small` | UEFI | 默认 Btrfs 布局的小容量完整安装 | 16,000,000,000 B | 通过 |
+| `uefi-luks-btrfs-small` | UEFI | LUKS2 内 Btrfs root/home，明文 `/boot` 和 ESP | 16,000,000,000 B | 通过 |
+| `bios-luks-ext4` | BIOS | GPT、LUKS2 内 ext4 根与 home，明文 `/boot` | 64 GiB | 通过 |
+| `uefi-luks-xfs` | UEFI | LUKS2 内 XFS 根与 home，明文 `/boot` 和 ESP | 64 GiB | 通过 |
 
 测试保存阶段日志、截图、ISO 校验值和 JSON 报告；失败仍上传诊断。
 测试账户只在这次虚拟机安装中创建，不写入正式 ISO。自动检查的范围以实际
-完成的报告为准；实体硬件、Secure Boot、多磁盘与已有加密分区复用不在这组范围内。
-加密场景还检查错误口令不能解锁、正确口令可用、crypttab 不含密钥文件、目标配置
-和安装日志不含测试口令、完成后关闭 mapper，以及移除 ISO 后真实提示输入口令并启动。
+完成的报告为准；这九组调用真实安装器后端，`graphical_layout_planner_tested=false`，
+没有宣称整个安装 GUI 已逐页点选。实体硬件、Secure Boot、aarch64、4Kn、多磁盘、
+已有加密分区复用、实际 rescue 启动和内核升级后启动不在这组已通过范围内。
+保留 home/ESP 验证了 UUID、PARTUUID、起止扇区与 marker 文件内容，未对原有
+UID/GID、mode、ACL、xattrs 作完整前后比较。
+
+加密场景在重启前检查错误口令被拒绝、正确口令可用，检查 crypttab 不含密钥文件、
+指定目标配置和日志不含测试口令、完成后正常关闭 mapper；随后移除 ISO，实际
+initramfs 提示输入口令并以正确口令启动。没有把重启前的负例检查写成启动界面
+输入错误口令的测试。两组 16 GB 成功结果也不是所有未来 payload 的容量承诺，
+安装前仍执行实际空间检查。
 
 如需对同一镜像重试，在 **Test ISO installation → Run workflow** 填入构建
 run ID 和完整 ISO artifact 名称；`scenario` 默认 `all`，也可选一组分区。
 控制器改动不会自动触发重新 compose。
+本次 `validate-iso4-20261127` 专用的临时 push 补测入口已停用；常规测试入口仅保留
+带明确 ISO 输入的 workflow_call / workflow_dispatch。
 
 诊断选项 `continue-after-desktop-failure` 默认关闭。显式开启时，桌面失败仍被
 记录，并允许继续收集独立的实际安装、分区和磁盘启动结果；任何桌面失败都会
@@ -194,8 +218,15 @@ FEDORA_DDE_ISO_BUILD=1 bash /workspace/scripts/build.sh
 ## 维护范围
 
 本仓库管理 ISO 配方、Live 会话与这一版的配置 RPM；安装器改动在安装器仓库维护。
-DDE 桌面和 DDM 软件包由 `Deepin-Desktop-Environment` 的维护者负责。本仓库消费其
-已发布的软件包，不修改或触发该仓库的构建。
+DDE 桌面和 DDM 软件包由 `Deepin-Desktop-Environment` 的维护者负责。ISO 构建工作流
+消费已发布的软件包及本文列出的固定临时重建，不自动修改维护仓库或触发 COPR。
+另行提交的 SPEC 修复通过独立 PR 审阅，不由 ISO 工作流代替维护者合并与构建。
+
+## 当前交付门槛
+
+`.4` 的九组实际安装证据已完成并可审阅，仍作为独立候选保留。主分支合并及正式
+Release 尚待相应批准；现有成功结果不代替合并、发布审阅，也不扩展为上面未测
+平台、GUI 路径或维护者新增 SPEC 版本的验收。
 
 ## 参考
 
