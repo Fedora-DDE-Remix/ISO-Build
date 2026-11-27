@@ -131,7 +131,8 @@ class LoginRegression(unittest.TestCase):
 
     def test_control_requires_two_stable_observations(self):
         vm = self.instance()
-        vm.login_session = mock.Mock(return_value={"treeland": [{"pid": 1}], "ready": False, "ddm_sessions": []})
+        vm.login_session = mock.Mock(return_value={"treeland": [{"pid": 1}], "ready": False, "ddm_sessions": [],
+                                                  "probe_complete": True, "crash_check_complete": True})
         vm.screen = mock.Mock(return_value=dict(SCREEN, path=str(self.baseline)))
         vm.wait_greeter(VM.LIVE_USER, 200, "test-greeter", checkpoint=CHECKPOINT, before_password=True)
         records = json.loads((self.output / "test-greeter-gate.json").read_text())
@@ -178,7 +179,8 @@ class LoginRegression(unittest.TestCase):
     def test_password_submission_alone_cannot_pass_login(self):
         vm = self.instance()
         vm.report = SimpleNamespace(remaining=lambda timeout: timeout)
-        session = dict(CHECKPOINT, ready=False, ddm_sessions=[], sessions=[], dde_shell_crashes=[])
+        session = dict(CHECKPOINT, ready=False, ddm_sessions=[], sessions=[], dde_shell_crashes=[],
+                       probe_complete=True, crash_check_complete=True)
         vm.guest.check.return_value = session
         vm.wait_greeter = mock.Mock(return_value=(SCREEN, {"password_control": self.control}))
         vm.submit_graphical_password = mock.Mock(return_value={"submissions": 1})

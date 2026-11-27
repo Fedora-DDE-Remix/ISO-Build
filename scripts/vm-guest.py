@@ -12,6 +12,7 @@ import fcntl
 import grp
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import pwd
@@ -54,7 +55,70 @@ def run(argv, *, check=True, timeout=120, capture=True, input_text=None, pass_fd
     return result
 
 
-def authorize():
+class ProbeIncomplete(Exception):
+    """A read-only observation could not finish; it is never a ready session."""
+
+    def __init__(self, stage, kind, message):
+        super().__init__(message)
+        self.detail = {"stage": stage, "kind": kind, "message": str(message)[:1000]}
+
+
+class SessionProbe:
+    """One wall-clock budget, including authorization, for a session sample."""
+
+    def __init__(self, seconds=30):
+        self.started = time.monotonic()
+        self.seconds = float(seconds)
+        require(math.isfinite(self.seconds) and 0 < self.seconds <= 30,
+                "Session probe budget must be finite and between 0 and 30 seconds.")
+        self.deadline = self.started + self.seconds
+
+    def marker(self, stage, event, **details):
+        print("VMTEST_PROBE_STAGE=" + json.dumps({
+            "stage": stage, "event": event,
+            "elapsed_seconds": round(time.monotonic() - self.started, 3),
+            "remaining_seconds": round(max(0, self.deadline - time.monotonic()), 3),
+            **details}, sort_keys=True), flush=True)
+
+    def remaining(self, stage):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise ProbeIncomplete(stage, "deadline", "The session probe exhausted its total wall-clock budget.")
+        return remaining
+
+    def collect(self, stage, operation):
+        self.marker(stage, "begin")
+        self.remaining(stage)
+        try:
+            result = operation()
+        except (OSError, UnicodeError) as error:
+            raise ProbeIncomplete(stage, "io", error) from error
+        self.remaining(stage)
+        self.marker(stage, "complete")
+        return result
+
+    def command(self, stage, argv, *, cap=15, check=True):
+        def execute():
+            # subprocess.run kills and reaps its child on TimeoutExpired. Keep
+            # the inherited process group: the controller's GNU timeout also
+            # kills descendants if the guest cannot finish its soft timeout.
+            try:
+                result = run(argv, timeout=min(cap, self.remaining(stage)), check=False)
+            except subprocess.TimeoutExpired as error:
+                raise ProbeIncomplete(stage, "timeout", f"{argv[0]} exceeded its remaining probe budget.") from error
+            if check and result.returncode:
+                raise ProbeIncomplete(stage, "command-failed",
+                                      f"{argv[0]} exited {result.returncode}: {(result.stderr or '')[-500:]}")
+            return result
+        return self.collect(stage, execute)
+
+
+def authorize(*, probe=None):
+    if probe is not None:
+        probe.marker("authorize", "begin")
+        probe.remaining("authorize")
+    # Invalid authorization, UID or VM identity is a hard failure, including
+    # when a session probe is retriable for unrelated collection timeouts.
     require(os.geteuid() == 0, "VM checks must run through normal guest sudo authentication.")
     require(Path("/sys/class/dmi/id/product_serial").read_text().strip() == "FDDESMOKE",
             "This is not the isolated test-install-vm QEMU guest.")
@@ -62,7 +126,13 @@ def authorize():
     require(marker.is_file() and not marker.is_symlink()
             and marker.stat().st_uid == 0 and not marker.stat().st_mode & 0o077
             and marker.read_text().strip() == "fedora-dde-vmtest-v1", "Missing private VM authorization marker.")
-    require(run(["systemd-detect-virt"]).stdout.strip() in {"qemu", "kvm"}, "Expected a QEMU/KVM guest.")
+    detection = (probe.command("authorize-virtualization", ["systemd-detect-virt"], cap=5, check=False)
+                 if probe is not None else run(["systemd-detect-virt"]))
+    require(detection.returncode == 0 and detection.stdout.strip() in {"qemu", "kvm"},
+            "Expected a QEMU/KVM guest.")
+    if probe is not None:
+        probe.remaining("authorize")
+        probe.marker("authorize", "complete")
 
 
 def test_context():
@@ -75,9 +145,11 @@ def properties(command):
     return dict(line.split("=", 1) for line in run(command).stdout.splitlines() if "=" in line)
 
 
-def processes():
+def processes(*, probe=None):
     result = []
     for path in Path("/proc").iterdir():
+        if probe is not None:
+            probe.remaining("processes")
         if not path.name.isdecimal():
             continue
         try:
@@ -88,7 +160,11 @@ def processes():
             if entry["exe"] == "/usr/bin/dde-shell":
                 entry["cmdline"] = (path / "cmdline").read_text().rstrip("\0").split("\0")
             result.append(entry)
-        except (OSError, UnicodeError):
+        except (OSError, UnicodeError) as error:
+            # A process may exit during enumeration. Other failures leave a
+            # session sample incomplete instead of silently losing evidence.
+            if probe is not None and not isinstance(error, (FileNotFoundError, ProcessLookupError)):
+                raise ProbeIncomplete("processes", "io", error) from error
             continue
     return result
 
@@ -281,56 +357,101 @@ def baseline(phase, expected_uuid=""):
     return result
 
 
-def shell_crashes(uid, boot_id, since_monotonic_us):
+def shell_crashes(uid, boot_id, since_monotonic_us, *, probe=None, observed=None):
     fields = "__MONOTONIC_TIMESTAMP,_BOOT_ID,COREDUMP_UID,COREDUMP_PID,COREDUMP_EXE,COREDUMP_SIGNAL,COREDUMP_SIGNAL_NAME"
-    output = run(["journalctl", "-b", "--no-pager", "-o", "json", "--output-fields=" + fields,
-                  f"COREDUMP_UID={uid}", "COREDUMP_EXE=/usr/bin/dde-shell"], timeout=15).stdout
-    crashes = []
+    command = ["journalctl", "-b", "--no-pager", "-o", "json", "--output-fields=" + fields,
+               f"COREDUMP_UID={uid}", "COREDUMP_EXE=/usr/bin/dde-shell"]
+    output = (probe.command("crash-journal", command) if probe is not None
+              else run(command, timeout=15)).stdout
+    crashes = observed if observed is not None else []
     for line in output.splitlines():
+        if probe is not None:
+            probe.remaining("crash-journal-decode")
         if not line.strip():
             continue
-        event = json.loads(line)
+        try:
+            event = json.loads(line)
+            if not isinstance(event, dict):
+                raise ValueError("Crash journal entry is not an object.")
+            timestamp = int(event["__MONOTONIC_TIMESTAMP"])
+        except (ValueError, KeyError, TypeError) as error:
+            if probe is not None:
+                raise ProbeIncomplete("crash-journal-decode", "invalid-output", error) from error
+            raise
         require(event.get("_BOOT_ID") == boot_id.replace("-", "")
                 and event.get("COREDUMP_UID") == str(uid)
                 and event.get("COREDUMP_EXE") == "/usr/bin/dde-shell",
                 "Unexpected identity in the filtered dde-shell crash journal.")
-        timestamp = int(event["__MONOTONIC_TIMESTAMP"])
         if timestamp >= since_monotonic_us:
             crashes.append(event)
     return crashes
 
 
-def session(user, since_monotonic_us=None, expected_boot_id=None):
-    observed_at = time.monotonic_ns() // 1000
-    boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-    uid = pwd.getpwnam(user).pw_uid
-    crashes = []
-    if since_monotonic_us is not None:
-        require(expected_boot_id == boot_id, "The guest rebooted during the graphical login check.")
-        since_monotonic_us = int(since_monotonic_us)
-        require(0 <= since_monotonic_us <= observed_at, "Invalid graphical-login monotonic checkpoint.")
-        crashes = shell_crashes(uid, boot_id, since_monotonic_us)
-    sessions = []
-    for line in run(["loginctl", "list-sessions", "--no-legend", "--no-pager"]).stdout.splitlines():
-        if not line.split():
-            continue
-        sid = line.split()[0]
-        command = ["loginctl", "show-session", sid, "--no-pager"]
-        data = properties(command)
-        if data.get("Name") == user:
-            sessions.append(data)
-    matching = [s for s in sessions if s.get("Service") == "ddm" and s.get("Type") == "wayland"
-                and s.get("Class") == "user" and s.get("Active") == "yes" and s.get("State") == "active"]
-    procs = processes()
-    shell = [p for p in procs if p["uid"] == uid and p["comm"] == "dde-shell"]
-    # Treeland can be a system compositor managed by DDM. Do not incorrectly
-    # require its UID to equal the authenticated desktop user's UID.
-    compositor = [p for p in procs if p["comm"] == "treeland"]
-    return {"user": user, "uid": uid, "ready": bool(matching and shell and compositor and not crashes),
-            "boot_id": boot_id, "observed_at_monotonic_us": observed_at,
-            "dde_shell_crashes": crashes,
-            "sessions": sessions, "ddm_sessions": matching, "dde_shell": shell, "treeland": compositor,
-            "wayland_sockets": [str(p) for p in Path(f"/run/user/{uid}").glob("wayland-*") if p.is_socket()]}
+def session(user, since_monotonic_us=None, expected_boot_id=None, *, budget_seconds=30):
+    probe = SessionProbe(budget_seconds)
+    result = {"user": user, "uid": None, "ready": False,
+              "boot_id": None, "observed_at_monotonic_us": None,
+              "dde_shell_crashes": None, "crash_check_complete": False,
+              "sessions": [], "ddm_sessions": [], "dde_shell": [], "treeland": [],
+              "wayland_sockets": [], "probe_complete": False, "probe_errors": [],
+              "probe_budget_seconds": probe.seconds}
+    try:
+        # Start the deadline before authorization's systemd-detect-virt, unlike
+        # other actions whose existing installation/diagnostic limits remain.
+        authorize(probe=probe)
+        observed_at = time.monotonic_ns() // 1000
+        boot_id = probe.collect("boot-identity", lambda:
+                                Path("/proc/sys/kernel/random/boot_id").read_text().strip())
+        uid = probe.collect("user-identity", lambda: pwd.getpwnam(user).pw_uid)
+        result.update(uid=uid, boot_id=boot_id, observed_at_monotonic_us=observed_at)
+        if since_monotonic_us is not None:
+            require(expected_boot_id == boot_id, "The guest rebooted during the graphical login check.")
+            since_monotonic_us = int(since_monotonic_us)
+            require(0 <= since_monotonic_us <= observed_at, "Invalid graphical-login monotonic checkpoint.")
+        else:
+            # An initial sample establishes this checkpoint; still verify that
+            # the journal is readable instead of treating an unknown as [].
+            require(expected_boot_id is None, "An initial session sample cannot supply only a boot ID.")
+            since_monotonic_us = observed_at
+        result["dde_shell_crashes"] = []
+        shell_crashes(uid, boot_id, since_monotonic_us, probe=probe,
+                      observed=result["dde_shell_crashes"])
+        result["crash_check_complete"] = True
+        listing = probe.command("loginctl-list", ["loginctl", "list-sessions", "--no-legend", "--no-pager"])
+        for line in listing.stdout.splitlines():
+            if not line.split():
+                continue
+            sid = line.split()[0]
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+", sid):
+                raise ProbeIncomplete("loginctl-list", "invalid-output", "Invalid loginctl session identifier.")
+            stage = "loginctl-show:" + sid
+            output = probe.command(stage, ["loginctl", "show-session", sid, "--no-pager"]).stdout
+            data = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
+            if data.get("Id") != sid or not {"Name", "Service", "Type", "Class", "Active", "State"} <= data.keys():
+                raise ProbeIncomplete(stage, "invalid-output", "loginctl did not return complete session properties.")
+            if data["Name"] == user:
+                result["sessions"].append(data)
+        result["ddm_sessions"] = [s for s in result["sessions"]
+                                  if s["Service"] == "ddm" and s["Type"] == "wayland"
+                                  and s["Class"] == "user" and s["Active"] == "yes" and s["State"] == "active"]
+        procs = probe.collect("processes", lambda: processes(probe=probe))
+        result["dde_shell"] = [p for p in procs if p["uid"] == uid and p["comm"] == "dde-shell"]
+        # Treeland may be a system compositor owned by another UID.
+        result["treeland"] = [p for p in procs if p["comm"] == "treeland"]
+        result["wayland_sockets"] = probe.collect("wayland-sockets", lambda:
+            [str(p) for p in Path(f"/run/user/{uid}").glob("wayland-*") if p.is_socket()])
+        probe.remaining("complete")
+        result["probe_complete"] = True
+        result["ready"] = bool(result["ddm_sessions"] and result["dde_shell"] and result["treeland"]
+                               and result["crash_check_complete"] and not result["dde_shell_crashes"])
+    except ProbeIncomplete as error:
+        result["probe_errors"].append(error.detail)
+        if not result["crash_check_complete"] and not result["dde_shell_crashes"]:
+            result["dde_shell_crashes"] = None
+        probe.marker(error.detail["stage"], "incomplete", **{k: v for k, v in error.detail.items() if k != "stage"})
+    result["probe_elapsed_seconds"] = round(time.monotonic() - probe.started, 3)
+    probe.marker("complete", "complete" if result["probe_complete"] else "incomplete")
+    return result
 
 
 def set_config(key, value):
@@ -785,16 +906,25 @@ def diagnostics():
 
 def main():
     os.umask(0o077)
-    authorize()
     args = sys.argv[1:]
     require(bool(args), "Missing VM check action.")
     action = args.pop(0)
+    if action == "session":
+        budget = 30
+        if "--probe-budget-seconds" in args:
+            require(len(args) >= 3 and args[-2] == "--probe-budget-seconds"
+                    and args.count("--probe-budget-seconds") == 1, "Invalid session probe budget option.")
+            budget = args[-1]
+            args = args[:-2]
+        require(len(args) in {1, 3}, "Expected a user and optional monotonic checkpoint/boot ID for session.")
+        result = session(*args, budget_seconds=budget)
+        print("VMTEST_RESULT=" + json.dumps(result, sort_keys=True), flush=True)
+        return
+    authorize()
     if action == "baseline":
         result = baseline(*args)
     elif action == "desktop-assets":
         result = desktop_assets(*args)
-    elif action == "session":
-        result = session(*args)
     elif action == "prepare":
         result = prepare()
     elif action == "account":

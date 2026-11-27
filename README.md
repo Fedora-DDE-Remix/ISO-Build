@@ -11,7 +11,8 @@
 [上一候选报告](VALIDATION-45.20261127.1.md)。`45.20261127.2` 补齐资源后，又在
 原桌面 schemas 的严格编译处发现重复 XML 元素，未生成 ISO，见
 [第二候选报告](VALIDATION-45.20261127.2.md)。当前配方加入已复现并修复的 schemas
-临时重建，仍须通过新 ISO 的九组真实 VM 验收。
+临时重建，已通过[真实 Go/RPM 严格检查与 ISO compose](https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/45981240945/job/140445377978)，
+仍须通过新 ISO 的九组真实 VM 验收。
 
 **本系列候选保持 SELinux Enforcing**：Live 和安装目标使用 Fedora 原生 PAM，
 系统配置为 `SELINUX=enforcing`。Live 启动参数显式包含 `selinux=1 enforcing=1`；

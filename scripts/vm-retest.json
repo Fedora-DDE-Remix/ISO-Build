@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "repository": "Fedora-DDE-Remix/ISO-Build",
+  "iso_run_id": 45981240945,
+  "iso_artifact_name": "Fedora-DDE-Remix-45.20261127.3-x86_64-16",
+  "iso_commit": "de9549735f77fd426834f5a3a9a1c3cc9d206a14",
+  "iso_sha256": "99bbaf5401740d1815da8cd20cbec25556d38a9f51c5f4b87a58964658a71a14",
+  "scenario": "uefi-luks-btrfs-small"
+}

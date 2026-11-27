@@ -16,7 +16,11 @@ Qt A/B 探针通过。完整临时 RPM 也已编译完成，并在独立的全�
 资源缺失，详见下文。`45.20261127.2` 的
 [compose / VM 运行](https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/45974028174)
 随后在原桌面 schemas 严格编译处失败，未生成 ISO、未运行 VM。当前
-`45.20261127.3` 接入对应的最小源码修复；完整桌面结论仍须来自新 VM 的日志和截图。
+`45.20261127.3` 接入对应的最小源码修复，已通过
+[真实 Go/RPM 严格检查与 ISO compose](https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/45981240945/job/140445377978)。
+实际工具链为 Go `1.27.4-X:nodwarf5` 和 GLib `2.90.1`；最终 payload 的
+`away=['XF86Away']`、背景默认值与资源所有权检查也通过。
+完整桌面结论仍须来自新 VM 的日志和截图。
 
 ## 固定输入和证据
 

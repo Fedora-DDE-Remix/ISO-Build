@@ -29,6 +29,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -90,6 +91,63 @@ def command(argv, *, timeout=120, check=True, input_text=None, env=None):
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, env=env)
     if check and result.returncode:
         raise Failure(f"{argv[0]} failed ({result.returncode}): {(result.stderr or '')[-4000:]}")
+    return result
+
+
+def session_probe_command(argv, duration):
+    """Bound this read-only helper inside the existing serial command budget."""
+    if duration <= 8:
+        raise GraphicalLoginDeadline("Too little graphical-login time remains for a bounded session observation.")
+    soft = min(30.0, duration - 8)
+    hard = soft + 3
+    # GNU timeout's separate process group also covers helper subprocesses.
+    # TERM, then KILL after two seconds, leaves at least three seconds for END.
+    return (["/usr/bin/timeout", "--signal=TERM", "--kill-after=2s", f"{hard:.3f}s",
+             *argv, "--probe-budget-seconds", f"{soft:.3f}"],
+            {"outer_seconds": duration, "soft_seconds": soft,
+             "hard_seconds": hard, "kill_after_seconds": 2})
+
+
+def kvm_access_snapshot(phase, device="/dev/kvm"):
+    """Observe access without changing identity, ACLs, or host security policy."""
+    result = {"observed_at": utc(), "phase": phase, "pid": os.getpid(),
+              "uid": os.getuid(), "euid": os.geteuid(), "gid": os.getgid(),
+              "egid": os.getegid(), "groups": os.getgroups(), "device": device,
+              "qemu_executable": shutil.which("qemu-system-x86_64")}
+    try:
+        node = os.stat(device)
+        result["stat"] = {"uid": node.st_uid, "gid": node.st_gid,
+            "mode": oct(stat.S_IMODE(node.st_mode)), "file_mode": stat.filemode(node.st_mode),
+            "inode": node.st_ino, "device_id": node.st_dev, "rdev": node.st_rdev,
+            "ctime_ns": node.st_ctime_ns, "character_device": stat.S_ISCHR(node.st_mode)}
+    except OSError as error:
+        result["stat_error"] = {"errno": error.errno, "message": str(error)}
+    result["access"] = {"read": os.access(device, os.R_OK), "write": os.access(device, os.W_OK)}
+    if os.access in os.supports_effective_ids:
+        result["access"].update(effective_read=os.access(device, os.R_OK, effective_ids=True),
+                                effective_write=os.access(device, os.W_OK, effective_ids=True))
+    try:
+        descriptor = os.open(device, os.O_RDWR | os.O_CLOEXEC)
+        os.close(descriptor)
+        result["open"] = {"success": True, "flags": "O_RDWR|O_CLOEXEC"}
+    except OSError as error:
+        result["open"] = {"success": False, "errno": error.errno,
+                          "message": str(error), "flags": "O_RDWR|O_CLOEXEC"}
+    try:
+        acl = command(["getfacl", "--numeric", "--absolute-names", "--", device], timeout=3, check=False)
+        result["acl"] = {"returncode": acl.returncode, "stdout": acl.stdout[-8192:], "stderr": acl.stderr[-2000:]}
+    except (OSError, subprocess.TimeoutExpired) as error:
+        result["acl_error"] = str(error)
+    for path, field in (("/proc/self/attr/current", "security_context"), ("/proc/self/status", "process_status")):
+        try:
+            value = Path(path).read_text(errors="replace")
+            if field == "process_status":
+                value = {key: text.strip() for line in value.splitlines() if ":" in line
+                         for key, text in [line.split(":", 1)]
+                         if key in {"Uid", "Gid", "Groups", "NoNewPrivs", "Seccomp", "Seccomp_filters", "CapEff"}}
+            result[field] = value if isinstance(value, dict) else value.strip()[:2048]
+        except OSError as error:
+            result[field + "_error"] = str(error)
     return result
 
 
@@ -520,9 +578,26 @@ class Guest:
         # Separate physical lines keep the canonical TTY input below 4096 bytes,
         # including while uploading a base64-encoded guest helper via heredoc.
         wrapped = f"printf '\\n{begin}\\n'; {{\n{text}\n}}; vm_status=$?; printf '\\n{end}%s\\n' \"$vm_status\"\n"
-        self.serial.send(wrapped)
-        self.serial.expect(re.escape(begin) + r"\n", min(60, duration))
-        body, result = self.serial.expect(re.escape(end) + r"[0-9]+\n", max(0, deadline - time.monotonic()))
+        began = False
+        try:
+            self.serial.send(wrapped)
+            self.serial.expect(re.escape(begin) + r"\n", min(60, duration))
+            began = True
+            body, result = self.serial.expect(re.escape(end) + r"[0-9]+\n", max(0, deadline - time.monotonic()))
+        except Exception as error:
+            # Retain the original exception, including a genuine framing failure.
+            # Never record the command text: other actions can carry credentials.
+            try:
+                partial = self.output / f"{name}-command-{self.counter}.partial.log"
+                partial.write_text(redact(self.serial.buffer))
+                detail = {"observed_at": utc(), "name": name, "counter": self.counter,
+                          "begin_observed": began, "duration_seconds": duration,
+                          "error_type": type(error).__name__, "error": redact(str(error)),
+                          "partial_output": partial.name}
+                (self.output / f"{name}-command-{self.counter}.failure.json").write_text(json.dumps(detail, indent=2) + "\n")
+            except (OSError, TypeError, AttributeError) as evidence_error:
+                log(f"Could not preserve partial serial command evidence: {evidence_error}")
+            raise
         status = int(result[len(end):].strip())
         path = self.output / (name + ".log")
         path.write_text(redact(body))
@@ -544,21 +619,57 @@ class Guest:
         self.run(script, "upload-helper", 120)
 
     def check(self, action, *arguments, timeout=120, name=None, budget=True):
-        text = shlex.join(["/usr/bin/python3", "-I", "/run/fedora-dde-vmtest/guest.py", action, *arguments])
-        _, body = self.run(text, name or action, timeout, budget=budget)
+        argv = ["/usr/bin/python3", "-I", "/run/fedora-dde-vmtest/guest.py", action, *arguments]
+        limits = None
+        if action == "session":
+            timeout = self.report.remaining(timeout) if budget else timeout
+            argv, limits = session_probe_command(argv, timeout)
+        status, body = self.run(shlex.join(argv), name or action, timeout,
+                                check=action != "session", budget=budget)
         results = re.findall(r"(?m)^VMTEST_RESULT=(.*)$", body)
+        if action == "session" and status in (124, 137):
+            # A hard timeout is host-observed failure, not a fabricated guest
+            # identity or an empty/no-crash observation. Preserve a real result
+            # if one was emitted before process-group termination.
+            observed = None
+            if len(results) == 1:
+                with contextlib.suppress(ValueError):
+                    observed = json.loads(results[0])
+            value = dict(observed) if isinstance(observed, dict) else {
+                "probe_origin": "controller", "guest_observation_available": False,
+                "crash_check_complete": False, "dde_shell_crashes": None}
+            value.update(ready=False, probe_complete=False)
+            value["probe_errors"] = list(value.get("probe_errors", [])) + [{
+                "stage": "session-helper", "kind": "hard-timeout" if status == 124 else "timeout-or-signal",
+                "source": "controller",
+                "message": f"The bounded session helper did not complete (exit {status}); see {name or action}.log",
+                "limits": limits}]
+            return value
+        require(status == 0, f"Guest {action} failed ({status}); see {name or action}.log: {redact(body[-4000:])}")
         require(len(results) == 1, f"Guest {action} did not return one structured result.")
         return json.loads(results[0])
 
     def recover(self):
-        if not self.ready:
-            return False
+        detail = {"observed_at": utc(), "attempted": self.ready, "recovered": False}
         try:
+            if not self.ready:
+                detail["reason"] = "The serial root shell was never authenticated."
+                return False
             self.serial.send(b"\x03\n")
             self.serial.expect(r"__VM_ROOT_READY__", 8)
+            detail["recovered"] = True
             return True
-        except Exception:
+        except Exception as error:
+            detail.update(error_type=type(error).__name__, error=redact(str(error)))
             return False
+        finally:
+            try:
+                partial = self.output / "serial-recovery.partial.log"
+                partial.write_text(redact(self.serial.buffer))
+                detail["partial_output"] = partial.name
+                (self.output / "serial-recovery.json").write_text(json.dumps(detail, indent=2) + "\n")
+            except (OSError, TypeError, AttributeError) as error:
+                log(f"Could not preserve serial recovery evidence: {error}")
 
 
 def parse_grub(text):
@@ -600,11 +711,10 @@ def accelerator(output, work):
     # query-kvm's enabled flag alone is not proof that initialization completed.
     # Sending query-kvm and quit together can terminate QEMU before it opens
     # /dev/kvm. Check access, then require a genuinely running probe machine.
-    try:
-        descriptor = os.open("/dev/kvm", os.O_RDWR | os.O_CLOEXEC)
-        os.close(descriptor)
-    except OSError as error:
-        reason = f"Cannot open /dev/kvm: {error}"
+    access = kvm_access_snapshot("probe-before")
+    (output / "kvm-probe-access.json").write_text(json.dumps(access, indent=2) + "\n")
+    if not access["open"]["success"]:
+        reason = f"Cannot open /dev/kvm: {access['open']['message']}"
         logfile.write_text(reason + "\n")
         return "tcg", {"available": False, "reason": reason}
 
@@ -650,6 +760,8 @@ def accelerator(output, work):
         if control is not None:
             control.close()
         qmp_path.unlink(missing_ok=True)
+        (output / "kvm-probe-after-access.json").write_text(json.dumps(
+            kvm_access_snapshot("probe-after"), indent=2) + "\n")
 
 
 class VM:
@@ -684,6 +796,9 @@ class VM:
             argv[argv.index("-cpu") + 1] = "host" if selected == "kvm" else "max"
             self.command = list(argv)
             (output / "qemu-command.json").write_text(json.dumps(argv, indent=2) + "\n")
+            if selected == "kvm":
+                (output / "kvm-launch-access.json").write_text(json.dumps(
+                    kvm_access_snapshot(f"{phase}-actual-launch"), indent=2) + "\n")
             self.logfile = (output / "qemu.log").open("w")
             try:
                 self.process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=self.logfile,
@@ -713,6 +828,9 @@ class VM:
                 exited_before_qmp = (self.qmp is None and self.process is not None
                                      and self.process.poll() is not None)
                 self.close()
+                if selected == "kvm":
+                    (output / "kvm-launch-failed-access.json").write_text(json.dumps(
+                        kvm_access_snapshot(f"{phase}-after-launch-failure"), indent=2) + "\n")
                 diagnostic = (output / "qemu.log").read_text(errors="replace")
                 if not (isinstance(error, Failure) and selected == "kvm" and exited_before_qmp
                         and re.search(r"(?im)^.*failed to initialize kvm: (?:Permission denied|Operation not permitted|No such file or directory|No such device)", diagnostic)):
@@ -852,11 +970,13 @@ class VM:
 
     def login_session(self, user, checkpoint, deadline, name):
         remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise GraphicalLoginDeadline("The graphical login deadline expired before the next session observation.")
+        if remaining <= 8:
+            raise GraphicalLoginDeadline("The graphical login deadline has no room for another bounded session observation.")
+        arguments = [user]
+        if checkpoint is not None:
+            arguments.extend((str(checkpoint["observed_at_monotonic_us"]), checkpoint["boot_id"]))
         try:
-            session = self.guest.check("session", user, str(checkpoint["observed_at_monotonic_us"]),
-                checkpoint["boot_id"], timeout=min(45, remaining), name=name)
+            session = self.guest.check("session", *arguments, timeout=min(45, remaining), name=name)
         except SerialTimeout as error:
             # Only a probe deliberately shortened by the stage's remaining
             # budget can become a stage-deadline error. Keep its original
@@ -867,9 +987,27 @@ class VM:
                     f"The graphical login deadline expired during its final {remaining:.2f}s session observation; "
                     "the original serial framing timeout is retained as the cause.") from error
             raise
-        require(not session["dde_shell_crashes"],
+        require(isinstance(session, dict), "Session observation is not a structured object.")
+        require(not session.get("dde_shell_crashes"),
                 "The target user's dde-shell crashed after this graphical login began: "
-                + json.dumps(session["dde_shell_crashes"])[-4000:])
+                + json.dumps(session.get("dde_shell_crashes"))[-4000:])
+        require(type(session.get("probe_complete")) is bool
+                and type(session.get("crash_check_complete")) is bool
+                and type(session.get("ready")) is bool,
+                "Session observation is missing its completion status.")
+        if session["crash_check_complete"]:
+            require(isinstance(session.get("dde_shell_crashes"), list), "A completed crash check must return its results.")
+        else:
+            require(session.get("dde_shell_crashes") is None, "An unknown crash state must not be reported as no crashes.")
+        if session["probe_complete"]:
+            require(session["crash_check_complete"]
+                    and all(key in session for key in ("boot_id", "observed_at_monotonic_us", "sessions", "ddm_sessions", "treeland")),
+                    "A complete session observation is missing guest or crash evidence.")
+        else:
+            require(not session["ready"] and session.get("probe_errors"),
+                    "An incomplete session observation must retain its failure reason and cannot be ready.")
+        with (self.output / "session-probe-events.jsonl").open("a") as events:
+            events.write(redact(json.dumps({"observed_at": utc(), "name": name, "observation": session})) + "\n")
         return session
 
     def wait_greeter(self, user, deadline, name, *, checkpoint, password_required=False, before_password=False):
@@ -885,8 +1023,19 @@ class VM:
         while time.monotonic() < deadline:
             session = self.login_session(user, checkpoint, deadline, f"{name}-session")
             if before_password:
-                require(not session["ready"] and not session["ddm_sessions"],
+                require(not session["ready"] and not session.get("ddm_sessions"),
                         "A graphical user session appeared before password entry (unexpected autologin).")
+            if not session["probe_complete"]:
+                reason = "Session observation incomplete: " + json.dumps(session["probe_errors"])[-2000:]
+                observations.append({"observed_at": utc(), "ready": False, "reason": reason,
+                                     "probe_complete": False, "control_stable": False})
+                (self.output / f"{name}-gate.json").write_text(json.dumps(observations, indent=2) + "\n")
+                stable_since = previous_control = None
+                if reason != previous_reason:
+                    log(reason)
+                    previous_reason = reason
+                time.sleep(max(0, min(2, deadline - time.monotonic())))
+                continue
             screen = self.screen(f"{name}-{len(observations) + 1:02d}", deadline=deadline)
             evidence = greeter_evidence(screen, session, user, password_required=password_required)
             control = evidence["password_control"]
@@ -987,8 +1136,13 @@ class VM:
 
     def desktop_login(self, user, password, timeout):
         deadline = time.monotonic() + self.report.remaining(timeout)
-        initial = self.guest.check("session", user, timeout=60, name="session-before-login")
-        require(not initial["ready"] and not initial["ddm_sessions"], "A graphical user session appeared before password entry (unexpected autologin).")
+        while True:
+            initial = self.login_session(user, None, deadline, "session-before-login")
+            require(not initial["ready"] and not initial.get("ddm_sessions"),
+                    "A graphical user session appeared before password entry (unexpected autologin).")
+            if initial["probe_complete"]:
+                break
+            time.sleep(max(0, min(2, deadline - time.monotonic())))
         checkpoint = {key: initial[key] for key in ("boot_id", "observed_at_monotonic_us")}
         (self.output / "graphical-login-checkpoint.json").write_text(json.dumps(checkpoint, indent=2) + "\n")
         # Keep the guest's normal greeter and compositor. OCR and the observed
@@ -1006,6 +1160,7 @@ class VM:
         # Submit once. A slow/black authenticated session never receives a
         # second password; the remaining original deadline is for observation.
         last = None
+        last_complete = None
         authenticated = False
         visible_since = None
         observation_deadline_error = None
@@ -1018,6 +1173,10 @@ class VM:
             except GraphicalLoginDeadline as error:
                 observation_deadline_error = error
                 break
+            if not last["probe_complete"]:
+                visible_since = None
+                continue
+            last_complete = last
             if any(s.get("Service") == "ddm" and s.get("Class") == "user" for s in last["sessions"]):
                 authenticated = True
             if last["ready"]:
@@ -1032,6 +1191,9 @@ class VM:
                         visible_since = now
                     elif now - visible_since >= 8:
                         stable = self.login_session(user, checkpoint, deadline, "session-stable")
+                        if not stable["probe_complete"]:
+                            visible_since = None
+                            continue
                         require(stable["ready"], "The graphical desktop session stopped during the stability check.")
                         return {"attempts": 1, "session": stable,
                                 "nonblack_frame": frame, "nonblack_stable_seconds": round(now - visible_since, 3),
@@ -1043,9 +1205,11 @@ class VM:
         message = ("DDM authenticated the user, but no stable session with nonblack desktop frames appeared "
                    "before the graphical login deadline; see desktop-frame-events.jsonl." if authenticated else
                    "DDM did not create an authenticated Wayland + dde-shell session before the graphical login "
-                   "deadline after one focused password submission. Last completed observation: " + json.dumps(last)[-3000:])
+                   "deadline after one focused password submission. Last completed observation: " + json.dumps(last_complete)[-3000:])
+        if last is not None and not last["probe_complete"]:
+            message += " Last sampling failure: " + json.dumps(last["probe_errors"])[-2000:]
         if observation_deadline_error:
-            message += " The final shortened observation also exhausted the stage deadline; its original framing error is retained."
+            message += " " + str(observation_deadline_error)
         raise Failure(message) from observation_deadline_error
 
     def poweroff(self):

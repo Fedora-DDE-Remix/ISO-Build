@@ -1,6 +1,13 @@
 name: Test ISO installation
 
 on:
+  push:
+    branches: [validate-iso3-20261127]
+    paths:
+      - '.github/workflows/test-install.yml'
+      - 'scripts/test-install-vm.py'
+      - 'scripts/test-vm-login.py'
+      - 'scripts/vm-*'
   workflow_call:
     inputs:
       iso-run-id:
@@ -64,18 +71,61 @@ jobs:
     timeout-minutes: 5
     outputs:
       scenarios: ${{ steps.select.outputs.scenarios }}
+      iso_run_id: ${{ steps.select.outputs.iso_run_id }}
+      iso_artifact_name: ${{ steps.select.outputs.iso_artifact_name }}
+      iso_commit: ${{ steps.select.outputs.iso_commit }}
+      iso_sha256: ${{ steps.select.outputs.iso_sha256 }}
     steps:
+      - name: Check out the test inputs
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Validate requested scenarios
         id: select
         env:
+          TEST_EVENT_NAME: ${{ github.event_name }}
           REQUESTED_SCENARIO: ${{ inputs.scenario }}
+          REQUESTED_ISO_RUN_ID: ${{ inputs.iso-run-id }}
+          REQUESTED_ISO_ARTIFACT: ${{ inputs.iso-artifact-name }}
         run: |
           python3 - <<'PY'
-          import json, os
+          import json, os, re
+          from pathlib import Path
           scenarios = ['uefi-btrfs', 'bios-ext4', 'bios-mbr-ext4',
                        'uefi-xfs-home-swap', 'uefi-preserve', 'uefi-small',
                        'uefi-luks-btrfs-small', 'bios-luks-ext4', 'uefi-luks-xfs']
-          requested = os.environ['REQUESTED_SCENARIO']
+          expected_commit = expected_sha256 = ''
+          run_id = os.environ['REQUESTED_ISO_RUN_ID']
+          artifact = os.environ['REQUESTED_ISO_ARTIFACT']
+          # Reusable workflows retain their caller's event context. A normal
+          # compose -> workflow_call from a push must use its explicit inputs.
+          if run_id or artifact:
+              if not run_id or not artifact:
+                  raise SystemExit('Both the ISO run ID and artifact name are required.')
+              requested = os.environ['REQUESTED_SCENARIO'] or 'all'
+          elif os.environ['TEST_EVENT_NAME'] == 'push':
+              if os.environ['GITHUB_REF'] != 'refs/heads/validate-iso3-20261127':
+                  raise SystemExit('Pinned ISO retests are restricted to the dedicated validation branch.')
+              pinned = json.loads(Path('scripts/vm-retest.json').read_text())
+              if (type(pinned.get('schema')) is not int or pinned['schema'] != 1
+                      or pinned.get('repository') != 'Fedora-DDE-Remix/ISO-Build'
+                      or type(pinned.get('iso_run_id')) is not int):
+                  raise SystemExit('Invalid pinned ISO retest identity.')
+              run_id = str(pinned['iso_run_id'])
+              artifact = pinned['iso_artifact_name']
+              requested = pinned['scenario']
+              expected_commit = pinned['iso_commit']
+              expected_sha256 = pinned['iso_sha256']
+              if (not re.fullmatch(r'[0-9a-f]{40}', expected_commit)
+                      or not re.fullmatch(r'[0-9a-f]{64}', expected_sha256)):
+                  raise SystemExit('The pinned ISO commit and raw SHA-256 are required.')
+          else:
+              raise SystemExit('Explicit ISO inputs are required outside the pinned push retest.')
+          if not re.fullmatch(r'[1-9][0-9]*', run_id):
+              raise SystemExit('Invalid ISO build run ID.')
+          if not re.fullmatch(r'Fedora-DDE-Remix-[A-Za-z0-9._-]+', artifact):
+              raise SystemExit('Invalid ISO artifact name.')
           if requested not in ['all', 'remaining', *scenarios]:
               raise SystemExit('Unknown partition scenario: ' + requested)
           selected = (scenarios if requested == 'all' else
@@ -83,6 +133,10 @@ jobs:
                       if requested == 'remaining' else [requested])
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write('scenarios=' + json.dumps(selected) + '\n')
+              output.write('iso_run_id=' + run_id + '\n')
+              output.write('iso_artifact_name=' + artifact + '\n')
+              output.write('iso_commit=' + expected_commit + '\n')
+              output.write('iso_sha256=' + expected_sha256 + '\n')
           PY
 
   install:
@@ -132,35 +186,54 @@ jobs:
           fi
 
       - name: Check the graphical login controller regressions
-        run: /usr/bin/python3 scripts/test-vm-login.py
+        run: |
+          /usr/bin/python3 scripts/test-vm-login.py
+          /usr/bin/python3 scripts/vm-session-probe-test.py
+          /usr/bin/python3 scripts/vm-controller-regression.py
 
       - name: Download the exact compose artifact
         uses: actions/download-artifact@v4
         with:
-          name: ${{ inputs.iso-artifact-name }}
-          run-id: ${{ inputs.iso-run-id }}
+          name: ${{ needs.matrix.outputs.iso_artifact_name }}
+          run-id: ${{ needs.matrix.outputs.iso_run_id }}
           github-token: ${{ github.token }}
           path: artifacts/iso
 
       - name: Verify the ISO checksum and record its source
         shell: bash
         env:
-          ISO_RUN_ID: ${{ inputs.iso-run-id }}
-          ISO_ARTIFACT_NAME: ${{ inputs.iso-artifact-name }}
+          ISO_RUN_ID: ${{ needs.matrix.outputs.iso_run_id }}
+          ISO_ARTIFACT_NAME: ${{ needs.matrix.outputs.iso_artifact_name }}
+          EXPECTED_ISO_COMMIT: ${{ needs.matrix.outputs.iso_commit }}
+          EXPECTED_ISO_SHA256: ${{ needs.matrix.outputs.iso_sha256 }}
         run: |
           set -euo pipefail
           (cd artifacts/iso && sha256sum --check --strict CHECKSUM)
           python3 - <<'PY'
-          import json, os
+          import hashlib, json, os
           from pathlib import Path
           origin = {'schema': 1, 'iso_run_id': os.environ['ISO_RUN_ID'],
                     'iso_artifact_name': os.environ['ISO_ARTIFACT_NAME'],
                     'test_commit': os.environ['GITHUB_SHA'],
                     'test_run_id': os.environ['GITHUB_RUN_ID']}
-          Path('artifacts/vm/artifact-origin.json').write_text(json.dumps(origin, indent=2) + '\n')
           info = json.loads(Path('artifacts/iso/build-info.json').read_text())
           if info.get('selinux') != 'enforcing' or info.get('pam') != 'fedora':
               raise SystemExit('The VM gate requires the release Enforcing/Fedora PAM image.')
+          expected_commit = os.environ['EXPECTED_ISO_COMMIT']
+          expected_sha256 = os.environ['EXPECTED_ISO_SHA256']
+          if expected_commit or expected_sha256:
+              if not expected_commit or not expected_sha256 or info.get('iso_commit') != expected_commit:
+                  raise SystemExit('The retest artifact does not match the pinned ISO source commit.')
+              images = list(Path('artifacts/iso').glob('*.iso'))
+              if len(images) != 1:
+                  raise SystemExit('The retest requires exactly one ISO.')
+              with images[0].open('rb') as source:
+                  actual_sha256 = hashlib.file_digest(source, 'sha256').hexdigest()
+              if actual_sha256 != expected_sha256:
+                  raise SystemExit('The retest ISO bytes differ from the pinned compose output.')
+              origin.update(pinned_iso_commit=expected_commit, pinned_iso_sha256=expected_sha256,
+                            pinned_iso_identity_verified=True)
+          Path('artifacts/vm/artifact-origin.json').write_text(json.dumps(origin, indent=2) + '\n')
           PY
           cp artifacts/iso/CHECKSUM artifacts/iso/build-info.json artifacts/vm/
 
