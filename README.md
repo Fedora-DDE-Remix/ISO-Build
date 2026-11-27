@@ -4,15 +4,20 @@
 `Fedora-DDE-Remix/fedora-dde-installer`，在当前 Live 会话内完成安装、用户、
 密码、时区和键盘配置，由用户决定何时重启。
 
-**当前配方为 45.20261127.3 候选，正式 Release 尚未发布。**
+**当前配方为 45.20261127.4 候选，正式 Release 尚未发布。**
 旧版 `45.20261127` 的真实桌面插件 SIGSEGV 和存储测试见
 [原版验证报告](VALIDATION-45.20261127.md)。`45.20261127.1` 已构建 ISO，但其
 首个 VM 在输入登录密码前后失败，未进入安装阶段；实际证据与控制器定位缺陷见
 [上一候选报告](VALIDATION-45.20261127.1.md)。`45.20261127.2` 补齐资源后，又在
 原桌面 schemas 的严格编译处发现重复 XML 元素，未生成 ISO，见
-[第二候选报告](VALIDATION-45.20261127.2.md)。当前配方加入已复现并修复的 schemas
+[第二候选报告](VALIDATION-45.20261127.2.md)。`.3` 加入已复现并修复的 schemas
 临时重建，已通过[真实 Go/RPM 严格检查与 ISO compose](https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/45981240945/job/140445377978)，
-仍须通过新 ISO 的九组真实 VM 验收。
+以及真实 Live 桌面和同 Live 账户配置，但加密安装收尾发现目标挂载泄漏到系统服务的
+mount namespace，详见[第三候选记录](VALIDATION-45.20261127.3.md)。当前 `.4` 使用
+安装器 `0.3.0-0.3`，在整个安装会话开始时隔离挂载；现有和后启动服务隔离已通过
+[真实内核回归](https://github.com/Fedora-DDE-Remix/fedora-dde-installer/actions/runs/46001067422)。
+新 ISO 的 compose、加密关闭、硬盘启动与九组布局仍需本轮独立验收，见
+[第四候选报告](VALIDATION-45.20261127.4.md)。
 
 **本系列候选保持 SELinux Enforcing**：Live 和安装目标使用 Fedora 原生 PAM，
 系统配置为 `SELINUX=enforcing`。Live 启动参数显式包含 `selinux=1 enforcing=1`；

@@ -48,10 +48,10 @@ from pathlib import Path
 marker = Path('/installer-rpms/verified-input.json')
 approved = {
     'schema': 1,
-    'commit': 'b5816732394a20188593b2918ebdddbc169e68dc',
-    'run_id': 45962759570,
-    'artifact_id': 15182236524,
-    'sha256': 'd7653b07fa8b44909f4cc45fd08552bfed22763051d19fb02127a429277767a7',
+    'commit': 'bd06acc59908771c726b907d65c92bc84b9f807d',
+    'run_id': 46001067422,
+    'artifact_id': 15198317588,
+    'sha256': '4f74da31a87cc93bdd5285d4ce15fb6033f5683d77bb5e0ae670c4441778098f',
 }
 
 def unique_keys(pairs):

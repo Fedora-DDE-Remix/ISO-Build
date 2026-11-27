@@ -44,6 +44,7 @@ TEST_PASSWORD = "FedoraVmtest2026"
 CRYPT_PASSWORD = "FedoraLuksVmtest2026"
 LIVE_USER = "liveuser"
 LIVE_PASSWORD = "liveuser"
+INSTALL_NAMESPACE_EXECUTOR = "/usr/share/fedora-dde-installer/tools/scripts/fedora_namespace.py"
 SCENARIOS = ("uefi-btrfs", "bios-ext4", "bios-mbr-ext4", "uefi-xfs-home-swap", "uefi-preserve", "uefi-small",
              "uefi-luks-btrfs-small", "bios-luks-ext4", "uefi-luks-xfs")
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)")
@@ -568,6 +569,46 @@ class Guest:
         self.serial.expect(r"(?:^|\n)__VM_ROOT_READY__ ?", 30)
         self.ready = True
         log("Serial login and normal sudo password authentication passed; root shell UID 0 verified.")
+
+    def enter_install_namespace(self):
+        """Use the shipped GUI executor for this already authenticated long-lived shell."""
+        require(self.ready, "Authenticate the ordinary account and sudo shell before entering installation isolation.")
+        _, before_text = self.run("/usr/bin/stat -Lc '%d %i' /proc/self/ns/mnt",
+                                  "installer-namespace-before", timeout=30)
+        identities = re.findall(r"(?m)^([0-9]+) ([0-9]+)$", before_text)
+        require(len(identities) == 1, "Could not identify the original serial shell mount namespace.")
+        before = dict(zip(("device", "inode"), map(int, identities[0])))
+        token = "__VM_INSTALL_NAMESPACE_UID_" + uuid.uuid4().hex[:12] + "__"
+        argv = ["/usr/bin/python3", "-I", INSTALL_NAMESPACE_EXECUTOR, "--exec",
+                "/bin/bash", "--noprofile", "--norc", "-c", root_shell_script(token)]
+        # This exec replaces the persistent Bash itself. A normal Guest.run
+        # wrapper cannot be used: its old-shell END marker would never execute.
+        # Every later backend stage and target check inherits this same namespace.
+        self.ready = False
+        try:
+            self.serial.send("exec " + shlex.join(argv) + "\n")
+            before_marker, response = self.serial.expect(
+                r"(?:^|\n)" + token + r"[0-9]+\n", self.report.remaining(45))
+            require(response.strip() == token + "0", "The isolated installation shell did not retain UID 0.")
+            self.serial.expect(r"(?:^|\n)__VM_ROOT_READY__ ?", self.report.remaining(30))
+            self.ready = True
+            (self.output / "installer-namespace-entry.log").write_text(redact(before_marker + response))
+        except Exception:
+            (self.output / "installer-namespace-entry.partial.log").write_text(redact(self.serial.buffer[-65536:]))
+            raise
+        _, after_text = self.run(shlex.join(["/usr/bin/python3", "-I", INSTALL_NAMESPACE_EXECUTOR, "--check"]),
+                                 "installer-namespace-check", timeout=30)
+        records = re.findall(r"(?m)^(\{[^\n]*\})$", after_text)
+        require(len(records) == 1, "The production namespace checker did not return one identity.")
+        after = json.loads(records[0])
+        require(isinstance(after, dict) and set(after) == {"device", "inode"}
+                and all(type(value) is int and value > 0 for value in after.values()) and after != before,
+                "The production executor did not create a new verified installation namespace.")
+        evidence = {"executor": INSTALL_NAMESPACE_EXECUTOR, "before": before, "after": after,
+                    "authentication": "existing ordinary account and sudo shell", "uid": 0}
+        (self.output / "installer-namespace.json").write_text(json.dumps(evidence, indent=2) + "\n")
+        log("Entered the shipped installer's private mount namespace; subsequent stages share the same shell.")
+        return evidence
 
     def run(self, text, name, timeout=120, check=True, budget=True):
         self.counter += 1
@@ -1399,6 +1440,10 @@ def main():
             if not args.continue_after_desktop_failure:
                 raise
 
+        with report.stage("enter-production-installer-mount-namespace"):
+            namespace = vm.guest.enter_install_namespace()
+            report.data["evidence"]["installer_mount_namespace"] = namespace
+
         with report.stage("prepare-disposable-partition-scenario"):
             report.data["evidence"]["partition_plan"] = vm.guest.check("prepare", timeout=180)
 
@@ -1407,12 +1452,16 @@ def main():
                 if stage == "configure":
                     report.data["evidence"]["account_configuration"] = vm.guest.check("account", timeout=120)
                 result = vm.guest.check("stage", stage, timeout=3600, name="backend-" + stage)
+                require(result.get("mount_namespace") == namespace["after"],
+                        "A backend stage did not retain the verified installation namespace.")
                 report.data["evidence"].setdefault("backend_stages", []).append(result)
                 if stage == "configure" and "-luks-" in args.scenario:
                     report.data["evidence"]["encrypted_target"] = vm.guest.check("encryption-check", "target", timeout=180)
 
         with report.stage("finalize-and-power-off-live"):
             installed = vm.guest.check("installed-state", timeout=120)
+            require(installed.get("mount_namespace") == namespace["after"],
+                    "Finalized installation state belongs to a different mount namespace.")
             report.data["evidence"]["installation"] = installed
             vm.screenshot("installation-finished-live")
             diagnostics = vm.guest.check("diagnostics", timeout=180)

@@ -5,8 +5,9 @@
 当前候选的[实际 compose](https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/45981240945/job/140445377978)已成功。
 修复宿主 KVM 授权后，同一 ISO 已通过真实 Live 图形登录、稳定桌面、资源和 Fedora PAM
 检查；16 GB 加密安装已完成分区、复制、系统配置及同次 Live 启动内的用户配置。
-当前阻断是 `finalize` 关闭 LUKS 映射时设备仍被占用。安装器记录的挂载均已正常卸载，
-但内核文件系统引用仍在；下一轮只补采实际占用证据，不放宽关闭映射或硬盘启动门禁。
+当前阻断是 `finalize` 关闭 LUKS 映射时设备仍被占用。后续诊断已确认，安装器记录的
+挂载虽已正常卸载，多个系统服务的独立 mount namespace 仍保留同一目标 Btrfs。
+正在修复安装挂载的隔离边界，不放宽关闭映射或硬盘启动门禁。
 尚未完成加密硬盘启动，其余八个场景也尚未执行。
 本报告不是正式发行通过凭据。
 
@@ -296,14 +297,47 @@ Device luks-9edfb36e-f08b-4943-a127-35694ff95bcb is still in use.
 为 `5,132,094` 字节，共 71 个文件，实际下载后独立核验 SHA-256：
 `0f2d2b334d99d10eff36a25a98311ed18773705128892a2dc381f271e91eba5d`。
 
-下一轮仍复用此 ISO，只在原 `finalize` 失败后收集有界只读占用诊断：device-mapper
+后续复验仍复用此 ISO，只在原 `finalize` 失败后收集有界只读占用诊断：device-mapper
 打开计数/holders、相关进程的 mount namespace、cwd/root/FD 元数据和内核日志。
 不终止进程、不额外卸载、不使用 deferred/force 关闭，不把诊断成功当作安装成功。
 诊断子进程共用 15 秒软预算，18 秒 TERM、再 2 秒 KILL，父进程最多等待 22 秒；
 证据采用私有文件逐步保存，采集超时或短命 PID 不覆盖原安装错误。
 新增 15 项诊断回归覆盖 Btrfs 虚拟设备号、mountinfo 转义、进程消失、预算/输出限制、
 块设备 FD、权限错误、秘密字段排除及失败状态保留；与既有 41 项合计 56 项本地通过，
-真实复验仍待执行。
+真实结果见下一节。
+
+### 第四次专用复验：实际确认其他命名空间保留目标挂载
+
+[Run 45996299589](https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/45996299589)
+使用测试提交 `fa77853c24834802308fb6857df7606cdc6270fc`。56 项宿主回归、KVM、
+原始 ISO 身份/摘要校验和 Live 桌面均通过，实际安装再次在 `finalize` 的 mapper close 失败。
+本轮生产安装器和 ISO 内容未改；原始失败继续保留，没有执行安装后硬盘启动。
+
+即时诊断与后续 `diagnostics.storage_cleanup` 逐字段相同，明确记录：
+
+- 后端 `phase=finalizing`、`owned_mounts=[]`，自身命名空间已无目标挂载。
+- mapper `252:0` 的 open count 为 1，`cryptsetup status` 为 active and in use，
+  sysfs holders 为空。
+- 保存的 15 个独立服务命名空间仍挂载 Btrfs `0:78` 的 `/root` 子卷到 `/target`，
+  SOURCE 均为本次 LUKS mapper；每个还保留 `/target/dev`、`/target/sys` 等子挂载，
+  合计每个 17 条。涉及 userdbd、resolved、udevd、dbus-broker、NetworkManager、
+  logind 等普通系统服务及数个 DDE 服务，不能归因为 DDE 或 UDisks 单独自动挂盘。
+- 这些进程保存下来的直接 FD/cwd/root 引用列表为空；命名空间中的文件系统挂载本身
+  就是实际引用，不需要进程另行打开一个目标文件。
+
+已扫描 19 个命名空间、141 个 PID、879 个 FD，耗时 0.047 秒。采集器退出 0，但
+到达预设输出上限，明确标记 `collection_complete=false`。保存下来的残留挂载足以
+解释目标仍被占用；没有据此声称已经穷举全部命名空间或排除所有其他引用。
+
+完整证据 [artifact 15195739622](https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/45996299589/artifacts/15195739622)
+为 `5,123,443` 字节，共 71 个文件，实际下载后独立核验 SHA-256：
+`ffdd1f855ecb92d85d7c4c4b655c18334f6e40939e3b4943a19afd95029c1957`。
+
+修复需要在第一次安装挂载前建立安装器自己的 mount namespace，使目标与 runtime
+挂载不出现在 PID 1 的命名空间中。仅对已经传播的 `/target` 事后改为 private 不足以
+修复；单个 private 锚点也不能防止之后新建的服务命名空间复制目标挂载。
+新修复将验证既有服务观察者、后启动观察者及跨阶段挂载可见性，再由新 RPM/ISO
+完成真正的加密关闭和硬盘启动测试。原 `.3` 不会因为后续生产修复而被改述为通过。
 
 ### 完整安装的验收流程
 

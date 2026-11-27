@@ -639,7 +639,8 @@ def installed_state():
             "installation_id": state["installation_id"], "install_profile": state["install_profile"],
             "kernels": state.get("kernels", []), "kernel_options": state.get("kernel_options", ""),
             "owned_mounts": state["owned_mounts"], "owned_mappers": state.get("owned_mappers", []),
-            "encrypted_root": encrypted, "secrets_cleared": True}
+            "encrypted_root": encrypted, "secrets_cleared": True,
+            "mount_namespace": state.get("mount_namespace")}
 
 
 def encryption_check(phase):
@@ -1285,7 +1286,13 @@ def main():
             except Exception as error:
                 print("VMTEST_STORAGE_PROBE_ERROR=" + str(error)[:500], flush=True)
         require(completed.returncode == 0, f"Actual installer backend {stage} failed ({completed.returncode}).")
-        result = {"stage": stage, "status": "passed", "state": json.loads(STATE.read_text()).get("phase")}
+        state = json.loads(STATE.read_text())
+        namespace = Path("/proc/self/ns/mnt").stat()
+        identity = {"device": namespace.st_dev, "inode": namespace.st_ino}
+        require(state.get("mount_namespace") == identity,
+                "The completed backend stage did not record this installation namespace.")
+        result = {"stage": stage, "status": "passed", "state": state.get("phase"),
+                  "mount_namespace": identity}
     else:
         raise RuntimeError("Unknown VM check action.")
     print("VMTEST_RESULT=" + json.dumps(result, sort_keys=True), flush=True)

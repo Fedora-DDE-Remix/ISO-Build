@@ -1,5 +1,5 @@
 Name:           fedora-dde-remix-config
-Version:        45.20261127.3
+Version:        45.20261127.4
 Release:        1%{?dist}
 Summary:        Configuration for the Fedora DDE Remix Live ISO
 License:        GPL-3.0-or-later
@@ -98,6 +98,10 @@ install -Dm644 config/distribution.info %{buildroot}%{_datadir}/deepin/distribut
 %{_datadir}/deepin/distribution.info
 
 %changelog
+* Fri Nov 27 2026 Fedora DDE Remix contributors - 45.20261127.4-1
+- Compose with the installer mount namespace correction and exact RPM provenance.
+- Keep Enforcing, Fedora PAM, persistent COPR and the existing desktop resources.
+
 * Fri Nov 27 2026 Fedora DDE Remix contributors - 45.20261127.3-1
 - Require the strictly validated desktop schema repair and Fedora background defaults.
 - Verify the installed mediakey schema and compiled XF86Away binding.

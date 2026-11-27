@@ -79,11 +79,11 @@ jobs:
           set -euo pipefail
           mkdir -p .build/installer-rpms
           source config/build.env
-          if [[ $INSTALLER_REF != b5816732394a20188593b2918ebdddbc169e68dc ]]; then
+          if [[ $INSTALLER_REF != bd06acc59908771c726b907d65c92bc84b9f807d ]]; then
             echo 'No verified artifact is pinned for this installer revision; building from source.'
             exit 0
           fi
-          if ! artifact_source_ref=$(gh api repos/Fedora-DDE-Remix/fedora-dde-installer/actions/runs/45962759570 --jq .head_sha); then
+          if ! artifact_source_ref=$(gh api repos/Fedora-DDE-Remix/fedora-dde-installer/actions/runs/46001067422 --jq .head_sha); then
             echo 'Installer CI metadata is unavailable; building from source.'
             exit 0
           fi
@@ -91,18 +91,18 @@ jobs:
             echo 'Installer CI revision differs; building from source.'
             exit 0
           fi
-          if ! gh api repos/Fedora-DDE-Remix/fedora-dde-installer/actions/artifacts/15182236524/zip > .build/installer-input.zip; then
+          if ! gh api repos/Fedora-DDE-Remix/fedora-dde-installer/actions/artifacts/15198317588/zip > .build/installer-input.zip; then
             echo 'Installer artifact is unavailable or expired; building from source.'
             exit 0
           fi
-          echo 'd7653b07fa8b44909f4cc45fd08552bfed22763051d19fb02127a429277767a7  .build/installer-input.zip' | sha256sum --check --strict
+          echo '4f74da31a87cc93bdd5285d4ce15fb6033f5683d77bb5e0ae670c4441778098f  .build/installer-input.zip' | sha256sum --check --strict
           unzip -q .build/installer-input.zip -d .build/installer-rpms
           python3 - <<'PY'
           import json
           from pathlib import Path
-          data = {'schema': 1, 'commit': 'b5816732394a20188593b2918ebdddbc169e68dc',
-                  'run_id': 45962759570, 'artifact_id': 15182236524,
-                  'sha256': 'd7653b07fa8b44909f4cc45fd08552bfed22763051d19fb02127a429277767a7'}
+          data = {'schema': 1, 'commit': 'bd06acc59908771c726b907d65c92bc84b9f807d',
+                  'run_id': 46001067422, 'artifact_id': 15198317588,
+                  'sha256': '4f74da31a87cc93bdd5285d4ce15fb6033f5683d77bb5e0ae670c4441778098f'}
           Path('.build/installer-rpms/verified-input.json').write_text(json.dumps(data, indent=2) + '\n')
           PY
 

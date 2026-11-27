@@ -226,6 +226,10 @@ class StorageEvidenceRegression(unittest.TestCase):
                 VM.main()
 
     def test_successful_finalize_does_not_run_probe(self):
+        namespace = Path("/proc/self/ns/mnt").stat()
+        self.state.update(phase="finalized", mount_namespace={"device": namespace.st_dev,
+                                                            "inode": namespace.st_ino})
+        self.state_path.write_text(json.dumps(self.state))
         with mock.patch.object(VM.sys, "argv", ["guest.py", "stage", "finalize"]), \
                 mock.patch.object(VM, "authorize"), \
                 mock.patch.object(VM, "run_backend", return_value=subprocess.CompletedProcess([], 0)), \
