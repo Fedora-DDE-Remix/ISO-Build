@@ -54,8 +54,10 @@ of a GitHub-generated archive of the same tree.
 After building all binary and source RPMs, the job installs this build's main,
 libs, desktop, services-plugins and devel packages inside the disposable
 container. It confirms the installed versions and source RPM match. `readelf`
-then requires a single global callback definition in the framework and only
-undefined references in the actual desktop/core plugins. Finally it builds
+then requires a single global callback definition in the framework and an
+undefined reference in the core plugin. The top-level desktop loader may have
+an undefined reference or no callback use; a defined copy is always rejected.
+Finally it builds
 and runs the nested Qt plugin probe in `scripts/diagnose-dpf` against these
 installed RPMs, using the same compiler flags as the original diagnosis.
 It does **not** run that directory's baseline-versus-header experiment.
@@ -63,6 +65,45 @@ It does **not** run that directory's baseline-versus-header experiment.
 A successful package build and probe validate the full source patch and
 shared callback ownership. Desktop behavior inside a Live or installed VM
 still requires separate verification; `desktop_vm_verified` remains false.
+
+## Independent validation of the completed RPM build (schema 2)
+
+The first full build at commit `ab1626ed9504613fcd9190eb48e484401c9d7961`,
+run `45950112995`, compiled all ten binary RPMs and the SRPM and installed the
+five main/runtime/devel packages. Its verifier then failed because it required
+the top-level desktop loader to retain an unused callback reference. The
+loader uses `LifeCycle`; its rebuilt binary has neither a converter symbol nor
+a converter relocation, and still depends on the shared framework. The core
+plugin has the required undefined reference and relocation; the framework
+has the sole definition. An absent top-level reference is therefore allowed;
+any definition in that plugin remains an error.
+
+The separate `validate-dfm-hotfix-*` workflow reuses only artifact
+`15177359692`, exactly `333599067` bytes, SHA-256
+`9854fe0f8539d2b201fddf5d860afc1b7ad39abca371acb902106fe39e73a0a2`.
+It verifies the complete archive and original manifest, installs its exact
+RPMs in a fresh Fedora 45 container, checks installed binary hashes, callback
+ownership, relocations and framework dependencies, and runs the actual nested
+Qt probe. It does not rebuild or edit the RPMs, source archive or patches.
+
+Schema 2 retains the original `build_commit`, `run_id`, `build_success: false`,
+`exit_status: 1` and `last_stage: verify-shared-symbol`. The original manifest
+is copied byte for byte to `provenance/original-hotfix-input.json`, and its
+checksum file is retained as `provenance/original-SHA256SUMS`. Independent
+`validation_commit`, `validation_run_id`, `validation_run_attempt`,
+`validation_success`, `validation_exit_status` and `validation_last_stage`
+describe the new run; `source_artifact` records the original ID, digest and
+size. A successful verification never rewrites the failed build-run history.
+
+All new installed-package, ELF, probe and dependency evidence is beneath
+`validation/`; consumers must use that prefix for schema 2. All original
+`sources/`, RPM/SRPM, `logs/`, `symbols/` and build provenance files remain
+unchanged. This updated explanation is copied only to
+`validation/provenance/README-validation.md`; the artifact's original
+`sources/README.md` is preserved. Consumers separately pin and verify both the
+original build identity and the successful validation identity. They bind the
+new artifact to the validation run and do not accept the original failed
+artifact as a successful installation input.
 
 ## Artifact and consumption contract
 

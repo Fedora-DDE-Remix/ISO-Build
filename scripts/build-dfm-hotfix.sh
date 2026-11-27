@@ -229,6 +229,10 @@ for name, defined in [('libdfm6-framework.so.1', True), ('libdd-core-plugin.so',
                       ('org.deepin.ds.desktop.so', False)]:
     rows = [line.split() for line in (root / (name + '.dynsym.txt')).read_text().splitlines()
             if line.split() and line.split()[-1] == symbol]
+    # The top-level desktop only invokes LifeCycle. With the inline storage
+    # removed it need not retain a reference to an unused event converter.
+    if name == 'org.deepin.ds.desktop.so' and not rows:
+        continue
     if len(rows) != 1 or rows[0][3] != 'OBJECT' or rows[0][4] != 'GLOBAL' or (rows[0][6] != 'UND') != defined:
         raise SystemExit('Unexpected event converter ownership in ' + name)
 PY
