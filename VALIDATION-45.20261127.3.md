@@ -186,6 +186,16 @@ artifact 名、配方提交与原始 ISO SHA-256。下载后同时检查 CHECKSU
 先选 `uefi-luks-btrfs-small`，其通过后再选 `remaining` 展开另外八组。
 上述局部回归不是实际 VM 桌面或加密安装的替代证据。
 
+首次专用复验 [run 45988598564](https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/45988598564)
+使用测试提交 `0e68e6434f02332fd2cf28a5a7014951d509ea86`，在 VM 启动前的控制器
+回归失败。旧 15 项、guest 13 项和真实 sudo shell 检查均通过；新增的真实进程组
+超时测试已确认 KILL 返回 137、保留 marker、串口 END 和后续命令正常，之后读取
+已退出子进程的 `/proc/<pid>/stat` 遇到 `ProcessLookupError: [Errno 3]`。
+这是进程回收与测试读取之间的竞态；本次 ISO 下载、校验、VM 步骤均跳过。
+修正仅让该测试接受 ENOENT/ESRCH，仍拒绝其他读取错误及尚存活的非僵尸进程；
+增加针对消失文件、权限错误和仍在运行状态的短回归后，控制器套件为 13 项。
+此失败保留在原 run，不作为实际桌面或存储结果。
+
 每组先真实启动 ISO，经 DDM 登录并验收桌面，执行实际安装后端的
 `preflight → partition → copy → system → ready → configure → finalize`。
 用户、密码、时区和键盘在复制结束后的同一次 Live 启动内配置。之后关机、移除 ISO，
@@ -220,7 +230,7 @@ DDE、DDM、COPR、发行版资源与本安装器流程是 Remix 定制，不能
 
 ## 发布状态
 
-- [ISO-Build draft PR #1](https://github.com/Fedora-DDE-Remix/ISO-Build/pull/1)
+- [ISO-Build draft PR #2](https://github.com/Fedora-DDE-Remix/ISO-Build/pull/2)，包含原候选与后续采集器修复；原 PR #1 已标记被替代并关闭，没有合并。
 - [安装器 draft PR #1](https://github.com/Fedora-DDE-Remix/fedora-dde-installer/pull/1)
 
 当前为独立候选的构建与测试工作。正式合并和 Release 应在本轮完整证据可审阅后确认。

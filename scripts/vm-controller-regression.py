@@ -53,6 +53,28 @@ class ControllerRegression(unittest.TestCase):
         return {"probe_complete": False, "ready": False, "crash_check_complete": False,
                 "dde_shell_crashes": None, "probe_errors": [{"stage": "sessions", "kind": "timeout"}]}
 
+    def assert_process_exited(self, pid):
+        try:
+            state = Path(f"/proc/{pid}/stat").read_text()
+        except OSError as error:
+            # Linux may reap the process after opening its procfs stat file.
+            # Both a missing path and ESRCH establish that it has exited.
+            if error.errno in {errno.ENOENT, errno.ESRCH}:
+                return
+            raise
+        self.assertEqual(state.split(") ", 1)[1].split()[0], "Z")
+
+    def test_reaped_process_race_accepts_only_missing_process_errors(self):
+        for number in (errno.ENOENT, errno.ESRCH):
+            with self.subTest(errno=number), mock.patch.object(Path, "read_text", side_effect=OSError(number, "reaped")):
+                self.assert_process_exited(123)
+        with mock.patch.object(Path, "read_text", side_effect=PermissionError(errno.EACCES, "denied")):
+            with self.assertRaises(PermissionError):
+                self.assert_process_exited(123)
+        with mock.patch.object(Path, "read_text", return_value="123 (still running) R 1 2 3"):
+            with self.assertRaises(AssertionError):
+                self.assert_process_exited(123)
+
     def test_soft_hard_and_transport_budgets_fit_existing_outer_limit(self):
         for duration in (8.5, 12, 45, 60):
             argv, limits = CONTROLLER.session_probe_command(["python3", "guest.py", "session", "liveuser"], duration)
@@ -87,9 +109,7 @@ class ControllerRegression(unittest.TestCase):
             self.assertIn("VMTEST_PROBE_STAGE=hanging-child", body)
             self.assertEqual(guest.run("printf after-timeout", "after-timeout", timeout=3), (0, "after-timeout\n"))
             for pid in json.loads(pid_file.read_text()).values():
-                state = Path(f"/proc/{pid}/stat")
-                if state.exists():
-                    self.assertEqual(state.read_text().split(") ", 1)[1].split()[0], "Z")
+                self.assert_process_exited(pid)
         finally:
             # Clean only children carrying this temporary test's unique path.
             if pid_file.exists():
