@@ -73,6 +73,8 @@ unsquashfs -xattrs -no-progress -d "$temporary/root" "$temporary/payload.img" \
     usr/lib/systemd/system/fedora-dde-live.service usr/libexec/fedora-dde-live \
     usr/libexec/fedora-dde-check-copr \
     usr/lib/systemd/system/ddm.service.d/20-fedora-kmscon.conf \
+    usr/bin/systemd-cryptsetup \
+    usr/lib/systemd/system-generators/systemd-cryptsetup-generator \
     usr/lib/sysimage/rpm \
     usr/share/fedora-dde-remix/rpm-manifest.txt \
     usr/share/fedora-dde-remix/build-info.json \
@@ -153,13 +155,21 @@ assert len(owner) == 5 and owner[0] == 'fedora-dde-remix-config' and owner[4] ==
 assert owner[2] == data.get('image_version'), 'DDM configuration RPM version differs from the image provenance'
 owner_manifest = f'{owner[0]}\t{owner[1]}:{owner[2]}-{owner[3]}\t{owner[4]}'
 assert owner_manifest in included.decode().splitlines(), 'DDM configuration RPM owner is absent from the payload manifest'
+for relative in ('usr/bin/systemd-cryptsetup',
+                 'usr/lib/systemd/system-generators/systemd-cryptsetup-generator'):
+    executable = regular(relative)
+    assert executable.stat().st_mode & 0o111, f'Encryption boot component is not executable: {relative}'
+    provider = subprocess.check_output(
+        ['rpm', '--root', str(root), '--dbpath', '/usr/lib/sysimage/rpm',
+         '-qf', '/' + relative, '--qf', '%{NAME}\n'], text=True).strip()
+    assert provider == 'systemd-udev', f'Unexpected Fedora encryption component provider: {relative}: {provider}'
 names = {line.split('\t')[0] for line in included.decode().splitlines()}
 required = {'dde-desktop-comps', 'ddm', 'dde-session', 'dde-shell', 'treeland',
             'fedora-dde-installer', 'fedora-dde-remix-config', 'kernel-core',
             'dracut-live', 'dracut-config-rescue', 'grub2-pc-modules', 'grub2-efi-x64-cdboot',
             'ddm-selinux', 'dde-daemon-selinux', 'dde-api-selinux', 'deepin-system-monitor-selinux',
             'selinux-policy-targeted', 'policycoreutils', 'libselinux-utils',
-            'cryptsetup', 'systemd-cryptsetup'}
+            'cryptsetup', 'systemd-udev'}
 assert required <= names, f'Required RPMs missing: {sorted(required - names)}'
 for package in data['dfm_hotfix']['runtime_rpms']:
     expected_package = f"{package['name']}\t{package['epoch']}:{package['version']}-{package['release']}\t{package['arch']}"
@@ -175,6 +185,7 @@ printf '%s\n' \
     'Actual payload SELinux xattrs: core system/DDM types and image-policy mountpoint contexts verified' \
     'DDM tty1 kmscon conflict: present and owned by the provenance-matched image configuration RPM' \
     'Persistent COPR repository: enabled, package-owned, verified key and RPM/TLS checks enabled' \
+    'Encryption boot executable and generator: present, executable and owned by systemd-udev' \
     'Conventional kernel-install and rescue hooks: preserved' \
     'Temporary Live account and empty password entries: absent' \
     'Embedded and external RPM manifests: identical' \

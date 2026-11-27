@@ -35,7 +35,6 @@ dracut-network
 dracut-config-generic
 dracut-config-rescue
 cryptsetup
-systemd-cryptsetup
 grub2-pc
 grub2-pc-modules
 grub2-tools
