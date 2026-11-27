@@ -198,6 +198,17 @@ def baseline(phase, expected_uuid=""):
     require(actual_base == ["0", base["version"], base["release"], "noarch", base["binary_rpm"]["source_rpm"]],
             "The desktop base package differs from the verified temporary dependency adaptation.")
     result["verified_desktop_base_hotfix"] = base["name"] + "-" + base["version"] + "-" + base["release"]
+    schemas = result["build_info"]["schemas_hotfix"]
+    require((schemas["name"], schemas["version"], schemas["release"]) ==
+            ("deepin-desktop-schemas", "6.0.13", "1.1.remix1.fc45")
+            and schemas.get("build_success") is True
+            and schemas["strict_schema_check"].get("success") is True
+            and schemas["strict_schema_check"].get("command") == "glib-compile-schemas --strict --dry-run",
+            "The desktop schema repair lacks the expected identity or successful strict build check.")
+    actual_schemas = run(["rpm", "-q", "--qf", "%{EPOCHNUM}\t%{VERSION}\t%{RELEASE}\t%{ARCH}\t%{SOURCERPM}", schemas["name"]]).stdout.split("\t")
+    require(actual_schemas == ["0", schemas["version"], schemas["release"], "noarch", schemas["binary_rpm"]["source_rpm"]],
+            "The installed desktop schemas differ from the verified temporary repair.")
+    result["verified_schemas_hotfix"] = schemas["name"] + "-" + schemas["version"] + "-" + schemas["release"]
     user = "liveuser" if phase == "live" else USERNAME
     account = pwd.getpwnam(user)
     groups = [grp.getgrgid(g).gr_name for g in os.getgrouplist(user, account.pw_gid)]

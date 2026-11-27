@@ -169,6 +169,21 @@ hotfix = build_info['dfm_hotfix']
 for package in hotfix['runtime_rpms']:
     actual = subprocess.check_output(['rpm', '-q', '--qf', '%{EPOCHNUM}\t%{VERSION}\t%{RELEASE}\t%{ARCH}', package['name']], text=True).split('\t')
     assert actual == ['0', hotfix['base_version'], hotfix['base_release'], 'x86_64'], 'Maintainer DFM input changed; review it before applying the temporary hotfix: ' + package['name']
+# The schema repair joins the ordinary local-RPM transaction below. Require
+# its exact reviewed input and successful native strict check before any upgrade.
+schemas = build_info['schemas_hotfix']
+assert (schemas['name'], schemas['version'], schemas['base_release'], schemas['release']) == (
+    'deepin-desktop-schemas', '6.0.13', '1.fc45', '1.1.remix1.fc45'), 'Unexpected schema repair identity'
+assert schemas.get('build_success') is True and schemas['strict_schema_check'].get('success') is True \
+    and schemas['strict_schema_check'].get('command') == 'glib-compile-schemas --strict --dry-run', 'The schema repair did not pass its native strict build check'
+old_schemas = subprocess.check_output(['rpm', '-q', '--qf', '%{EPOCHNUM}\t%{VERSION}\t%{RELEASE}\t%{ARCH}', schemas['name']], text=True).split('\t')
+assert old_schemas == ['0', schemas['version'], schemas['base_release'], 'noarch'], 'Maintainer schema input changed; review it before the temporary repair'
+schemas_filename = schemas['binary_rpm']['filename']
+assert schemas_filename == 'deepin-desktop-schemas-6.0.13-1.1.remix1.fc45.noarch.rpm'
+schemas_rpm = Path('/root/compose-rpms') / schemas_filename
+assert schemas_rpm.is_file() and not schemas_rpm.is_symlink()
+with schemas_rpm.open('rb') as stream:
+    assert hashlib.file_digest(stream, 'sha256').hexdigest() == schemas['binary_rpm']['sha256'], 'The local schema RPM digest changed'
 # DSysInfo's distribution file is a new Remix-owned path. Stop if another
 # package begins providing it, including an owned-but-missing file; never
 # replace an existing maintainer configuration to repair the image's logo.

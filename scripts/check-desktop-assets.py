@@ -24,6 +24,7 @@ TRANSPARENT_LOGO = "/usr/share/pixmaps/fedora-remix-logos/Fedora-Remix-Transpare
 TREELAND = "/usr/share/dsg/configs/overrides/org.deepin.dde.treeland/org.deepin.dde.treeland.user/90-fedora-dde-remix-background.json"
 APPEARANCE = "/usr/share/dsg/configs/overrides/org.deepin.dde.appearance/org.deepin.dde.appearance/90-fedora-dde-remix-background.json"
 GSETTINGS = "/usr/share/glib-2.0/schemas/99-fedora-dde-remix-background.gschema.override"
+MEDIAKEY_SCHEMA = "/usr/share/glib-2.0/schemas/com.deepin.dde.keybinding.mediakey.gschema.xml"
 DISTRIBUTION = "/usr/share/deepin/distribution.info"
 CONFIG_PACKAGE = "fedora-dde-remix-config"
 
@@ -125,6 +126,14 @@ def check(root):
                      GSETTINGS_SCHEMA_DIR=str(schema_dir)))
         require(ast.literal_eval(result.strip()) == value,
                 f"Compiled GSettings default did not adopt the override: {schema}.{key}")
+    owned(root, MEDIAKEY_SCHEMA, "deepin-desktop-schemas")
+    result = subprocess.check_output(
+        ["gsettings", "get", "com.deepin.dde.keybinding.mediakey", "away"], text=True,
+        env=dict(os.environ, LC_ALL="C", GSETTINGS_BACKEND="memory",
+                 GSETTINGS_SCHEMA_DIR=str(schema_dir)))
+    mediakey_away = ast.literal_eval(result.strip())
+    require(mediakey_away == ["XF86Away"],
+            "The compiled mediakey schema is missing or changed its XF86Away default")
     with wallpaper.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
     return {"schema": 1, "wallpaper": WALLPAPER, "wallpaper_uri": URI,
@@ -135,6 +144,10 @@ def check(root):
             "system_artwork": "generic-logos", "primary_fedora_logo_package_absent": True,
             "distribution_name": "Fedora DDE Remix",
             "compiled_gsettings_defaults_verified": True,
+            "mediakey_schema": MEDIAKEY_SCHEMA,
+            "mediakey_schema_rpm_owner": "deepin-desktop-schemas",
+            "mediakey_away": mediakey_away,
+            "compiled_mediakey_default_verified": True,
             "structural_assets_verified": True}
 
 

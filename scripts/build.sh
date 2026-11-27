@@ -37,6 +37,7 @@ iso_ref=$(git -c safe.directory=/workspace -C /workspace rev-parse HEAD)
 export INSTALLER_REF FEDORA_RELEASE TARGET_ARCH CONFIG_VERSION iso_ref
 python3 /workspace/scripts/prepare-dfm-hotfix.py
 bash /workspace/scripts/build-desktop-base-hotfix.sh
+bash /workspace/scripts/build-schemas-hotfix.sh
 
 # The workflow checks the pinned archive digest and Actions run before making
 # this directory available read-only. No credentials enter this container.
@@ -210,6 +211,7 @@ data = {
     'installer_input': json.loads(Path('/work/installer-input.json').read_text()),
     'dfm_hotfix': json.loads(Path('/work/dfm-hotfix-input.json').read_text()),
     'desktop_base_hotfix': json.loads(Path('/work/desktop-base-hotfix-input.json').read_text()),
+    'schemas_hotfix': json.loads(Path('/work/schemas-hotfix-input.json').read_text()),
     'live_login': 'manual',
     'built_at_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
 }

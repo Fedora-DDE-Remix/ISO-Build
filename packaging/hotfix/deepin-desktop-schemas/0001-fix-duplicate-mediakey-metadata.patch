@@ -1,0 +1,21 @@
+Subject: [PATCH] schemas: remove duplicate metadata from the away key
+
+The away key already has a summary and description. Remove the second
+empty copies so GLib can compile the whole mediakey schema under --strict.
+Keep its XF86Away default and descriptive text unchanged.
+
+Applies to upstream 6.0.13, commit 00a92111f8f0cc7bcba8af9ae2a9950c7f02ae4e.
+
+diff --git a/schemas/com.deepin.dde.keybinding.mediakey.gschema.xml b/schemas/com.deepin.dde.keybinding.mediakey.gschema.xml
+index 719e5f2..46e3d58 100644
+--- a/schemas/com.deepin.dde.keybinding.mediakey.gschema.xml
++++ b/schemas/com.deepin.dde.keybinding.mediakey.gschema.xml
+@@ -316,8 +316,6 @@
+             <default>['XF86Away']</default>
+             <summary>Lock user</summary>
+             <description></description>
+-            <summary/>
+-            <description/>
+         </key>
+ 
+         <key type="as" name="messenger">

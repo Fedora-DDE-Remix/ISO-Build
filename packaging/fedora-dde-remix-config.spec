@@ -1,5 +1,5 @@
 Name:           fedora-dde-remix-config
-Version:        45.20261127.2
+Version:        45.20261127.3
 Release:        1%{?dist}
 Summary:        Configuration for the Fedora DDE Remix Live ISO
 License:        GPL-3.0-or-later
@@ -24,6 +24,7 @@ Requires:       python3
 Requires:       rpm
 Requires:       policycoreutils
 Requires:       libselinux-utils
+Requires:       deepin-desktop-schemas >= 6.0.13-1.1.remix1
 Requires:       desktop-backgrounds-basic
 Requires:       generic-logos
 Requires:       fedora-remix-logos
@@ -97,6 +98,10 @@ install -Dm644 config/distribution.info %{buildroot}%{_datadir}/deepin/distribut
 %{_datadir}/deepin/distribution.info
 
 %changelog
+* Fri Nov 27 2026 Fedora DDE Remix contributors - 45.20261127.3-1
+- Require the strictly validated desktop schema repair and Fedora background defaults.
+- Verify the installed mediakey schema and compiled XF86Away binding.
+
 * Fri Nov 27 2026 Fedora DDE Remix contributors - 45.20261127.2-1
 - Select Fedora-packaged JPEG backgrounds and permitted Fedora Remix logos.
 - Keep existing user wallpaper settings and maintainer-owned defaults intact.

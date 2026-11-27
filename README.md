@@ -4,12 +4,14 @@
 `Fedora-DDE-Remix/fedora-dde-installer`，在当前 Live 会话内完成安装、用户、
 密码、时区和键盘配置，由用户决定何时重启。
 
-**当前配方为 45.20261127.2 候选，正式 Release 尚未发布。**
+**当前配方为 45.20261127.3 候选，正式 Release 尚未发布。**
 旧版 `45.20261127` 的真实桌面插件 SIGSEGV 和存储测试见
 [原版验证报告](VALIDATION-45.20261127.md)。`45.20261127.1` 已构建 ISO，但其
 首个 VM 在输入登录密码前后失败，未进入安装阶段；实际证据与控制器定位缺陷见
-[上一候选报告](VALIDATION-45.20261127.1.md)。当前配方修复输入定位，并补齐实际
-镜像中缺失的壁纸与 Remix 标识资源，仍须通过新 ISO 的九组真实 VM 验收。
+[上一候选报告](VALIDATION-45.20261127.1.md)。`45.20261127.2` 补齐资源后，又在
+原桌面 schemas 的严格编译处发现重复 XML 元素，未生成 ISO，见
+[第二候选报告](VALIDATION-45.20261127.2.md)。当前配方加入已复现并修复的 schemas
+临时重建，仍须通过新 ISO 的九组真实 VM 验收。
 
 **本系列候选保持 SELinux Enforcing**：Live 和安装目标使用 Fedora 原生 PAM，
 系统配置为 `SELINUX=enforcing`。Live 启动参数显式包含 `selinux=1 enforcing=1`；
@@ -45,7 +47,9 @@ DNF 5 的 `group install` 对应桌面组安装操作。comps RPM 先安装本�
 产物的 `comps-input.json` 和 `build-info.json` 记录实际选择的来源、版本及校验值。
 安装后直接读取该 RPM 的 comps 元数据，逐一检查 `dde-desktop` 的 mandatory 包已安装；
 DNF 即使跳过缺失的组包并返回成功，也不能绕过这项检查。
-本工作流不写入 COPR，`Deepin-Desktop-Environment` 维护仓库保持只读。
+本工作流不写入 COPR。经后续追加的 SPEC 修复要求，维护仓库的已确认问题另通过
+[独立修复 PR](https://github.com/Fedora-DDE-Remix/Deepin-Desktop-Environment/pull/1)
+提交，保留主分支供维护者审阅合并，COPR 构建由维护者自测。
 本次独立 DFM 临时包重建的原因、固定输入和验收边界见
 [桌面插件故障与临时补丁报告](DDE-HOTFIX-20261127.md)。
 
@@ -86,6 +90,12 @@ RPM 所有者及编译后的 GSettings 默认值，VM 在真实登录后继续�
 源码和其余打包行为保持一致；配方先安装这个 noarch 包，再定向替换系统图形资源，
 验证没有移除其他桌面包。来源、原 SPEC、临时 SPEC、源码归档及 SRPM 随构建证据保留，
 详见[临时依赖调整](packaging/hotfix/deepin-desktop-base/README.md)。
+
+45.20261127.3 还临时重建 `deepin-desktop-schemas-6.0.13-1.1.remix1.fc45`：修复
+mediakey `away` 键的重复元素，在真实 RPM `%check` 中严格编译全部 schema 和 Go
+生成的 override，并将该包自己的背景默认值也改为现存 JPEG。维护者后续的
+`6.0.13-2.fc45` 可以正常替代这个临时版本。镜像和 VM 会读取实际编译缓存，确认
+该快捷键 schema 存在并保留原默认值；详见[schemas 临时修复](packaging/hotfix/deepin-desktop-schemas/README.md)。
 
 ## Live 登录与 PAM
 

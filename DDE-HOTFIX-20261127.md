@@ -11,6 +11,13 @@ Qt A/B 探针通过。完整临时 RPM 也已编译完成，并在独立的全�
 通过整包安装、实际 ELF 检查及嵌套 Qt 探针。**实际桌面和安装 VM 仍待验收，
 不能用容器内的探针结果代替桌面恢复证明。**
 
+`45.20261127.1` 的首个 VM 未能完成图形密码输入，因此没有进入用户桌面或
+安装阶段，不能用它确认或否定 DPF 修复。其实际镜像还暴露了独立的壁纸与标识
+资源缺失，详见下文。`45.20261127.2` 的
+[compose / VM 运行](https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/45974028174)
+随后在原桌面 schemas 严格编译处失败，未生成 ISO、未运行 VM。当前
+`45.20261127.3` 接入对应的最小源码修复；完整桌面结论仍须来自新 VM 的日志和截图。
+
 ## 固定输入和证据
 
 | 输入 | 身份 |
@@ -27,8 +34,10 @@ Qt A/B 探针通过。完整临时 RPM 也已编译完成，并在独立的全�
 | 完整 RPM 独立复验 | [Actions 45956698212](https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/45956698212)；success |
 | 原 ISO 桌面失败证据 | [Actions 45874836926](https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/45874836926)、[原版报告](VALIDATION-45.20261127.md) |
 
-维护仓库保持只读。上述诊断和临时构建都位于 ISO-Build 的独立分支，没有向维护
-仓库提交，也没有向 COPR 发布或使用 COPR 私钥。
+上述诊断和临时构建位于 ISO-Build 的独立分支。追加授权仔细审查并提交桌面 SPEC
+问题后，已有修复另提交至维护仓库的
+[draft PR #1](https://github.com/Fedora-DDE-Remix/Deepin-Desktop-Environment/pull/1)，
+主分支保持未合并；没有向 COPR 发布、触发 COPR 构建或使用 COPR 私钥。
 
 ## 崩溃链条
 
@@ -138,3 +147,105 @@ artifact SHA-256 记录来源；它们不是由 COPR 签名的新官方包。镜
 最终门禁仍要求真实 DDM 登录、无同类 shell 崩溃、持续可见画面、人工截图复核，
 以及 Live 和安装后的 SELinux Enforcing。加密和分区检查独立记录，不以存储安装
 成功代替桌面成功。
+
+## 壁纸与发行版标识：独立的资源问题
+
+上一候选的完整 SquashFS 清单有 110,228 行，但 `/usr/share/backgrounds` 和
+`/usr/share/wallpapers` 下没有可用壁纸文件。实际 wallpaper factory 日志还记录
+读取 `deepin-default.jpg` 失败。这能解释缺失背景，不能替代上面的 SIGSEGV 根因。
+证据与失败阶段保存在[上一候选报告](VALIDATION-45.20261127.1.md)。
+
+固定 Treeland 0.12.0 的
+[默认配置](https://github.com/linuxdeepin/treeland/blob/859a8c314f00947bc98168f46631ba10f9c7e6fa/misc/dconfig/org.deepin.dde.treeland.user.json)
+指向 `/usr/share/backgrounds/default_background.jpg`；DDE appearance 的默认背景
+以及旧桌面 schemas 引用的 `/usr/share/backgrounds/deepin/desktop.jpg` 也不存在。
+只把缺失路径写进配置并不会带来对应资源包。
+
+同时，镜像没有 DSysInfo 使用的 `deepin/distribution.info`。
+[Treeland 的 LogoProvider](https://github.com/linuxdeepin/treeland/blob/859a8c314f00947bc98168f46631ba10f9c7e6fa/src/plugins/lockscreen/logoprovider.cpp)
+将回退值 `:/dsg/logo.svg` 交给 `QUrl::fromUserInput`，本次实际日志呈现为无效的
+`file::/dsg/logo.svg` 路径。候选配置给它提供真实安装的 Remix PNG 路径。
+
+`45.20261127.2` 的处理：
+
+- 依赖 Fedora `desktop-backgrounds-basic`，统一使用其
+  `/usr/share/backgrounds/images/earth_from_space.jpg`。选择 JPEG 是为了同时适配
+  当前 DDE 的背景选择界面和 Treeland；不依赖所有组件都能处理 JXL。
+- 以资源级 DConfig override 设置 Treeland `defaultBackground` 和 appearance
+  `Background_Uris`，并提供对应 GSettings 默认值；不重置已有用户的壁纸缓存。
+- `distribution.info` 使用 `Name=Fedora DDE Remix`，Logo 与 LogoTransparent
+  分别引用 `fedora-remix-logos` 包提供的实际 PNG。
+- 镜像门禁检查真实文件、RPM 所有者、文件格式和编译后的 GSettings 默认值；
+  VM 在稳定登录后读取实际 Treeland 服务 UID 的用户子路径配置及登录用户的
+  appearance 配置，再检查实际截图。静态配置检查不能独立证明渲染成功。
+
+Fedora 的[主标识包说明](https://packages.fedoraproject.org/pkgs/fedora-logos/fedora-logos/index.html)
+明确区分 Spin 与 Remix；本项目使用
+[Fedora Remix 标识包](https://packages.fedoraproject.org/pkgs/fedora-remix-logos/fedora-remix-logos/)
+及 `generic-logos` 系统图形资源。
+
+## desktop-base 的临时依赖调整
+
+维护提交 `adcd681b0b9e68cacbf9daa33bede62a253a3315` 的
+`deepin-desktop-base-2026.10.28-1` SPEC 硬性依赖 `fedora-logos`，阻止正常替换系统
+图形资源。临时 noarch 重建只有两行变化：
+
+```diff
+-Release:        1%{?dist}
++Release:        1.1.remix1%{?dist}
+-Requires:       fedora-logos
++Requires:       system-logos
+```
+
+上游源码固定到 `63c52c9387a350df684bb5043dd836d86f862092`，其余 SPEC 内容及安装
+行为保持一致。镜像先核对原包 EVR 和新包 SHA-256，安装该临时包，再执行定向
+`dnf swap fedora-logos generic-logos`，核对没有移除其他桌面包，最后安装配置 RPM。
+没有伪造 `fedora-logos` Provides，也没有广泛允许删除依赖包。
+
+原 SPEC、新 SPEC、固定来源、源码归档、二进制 RPM、匹配 SRPM 与构建记录均由
+[本仓库的临时构建](packaging/hotfix/deepin-desktop-base/README.md)保留。
+该临时包在 `.2` 中已完成原生 RPM/SRPM 构建和定向安装，实际 swap 只移除了
+`fedora-logos`，全部 69 个桌面 mandatory 包仍在。`.2` 随后在独立的 schemas
+严格检查处失败，没有完成最终镜像检查；这个依赖调整本身不是 DPF 崩溃补丁。
+维护者后续若发布更高版本，应同步确认依赖可接受 `system-logos`；继续硬性要求
+`fedora-logos` 会与本配置包要求的 `generic-logos` 形成依赖冲突。
+
+## schemas 的实际严格编译失败
+
+`.2` 在全部桌面包安装完成后执行 `glib-compile-schemas --strict`，对
+`com.deepin.dde.keybinding.mediakey.gschema.xml` 的 319:23 报错：同一个 key 只允许
+一个 summary。上游 `6.0.13` 的 `away` 键实际同时含两个 summary 和两个 description，
+后面的两项为空；原 SPEC 的安装脚本静默忽略编译错误，包安装成功无法证明缓存完整。
+
+固定上游提交 `00a92111f8f0cc7bcba8af9ae2a9950c7f02ae4e` 的原文件在本机 GLib
+2.84.4 重现相同错误。最小补丁只删除重复的两个空元素，保留 `['XF86Away']`
+默认值和 `Lock user` 文案，全部 79 个 XML 随后通过严格编译。x86 base、四组
+edition 以及 Remix override 的检查也通过；不加入 ISO override 时，两项背景
+默认值已指向 Fedora JPEG。
+
+本机未执行 Go 编译器，override 合并按固定上游生成器的语义重现。`.3` 的
+[临时 RPM 配方](packaging/hotfix/deepin-desktop-schemas/README.md)会使用真实 Fedora
+Go 工具链，并在 RPM `%check` 对实际 buildroot 执行严格编译。ISO 的严格检查
+保留，安装系统仍使用 Fedora glib2 文件触发器维护缓存。
+
+修复补丁 SHA-256 为 `c0e06ede2bfef58227a2dff6cbb2292800b721ef6ac98150cb5fd9323d9ff709`。
+维护者 PR 使用普通 Release `2`，ISO 临时包使用较低的 `1.1.remix1`，便于后续升级。
+
+## 其他插件和服务告警
+
+| 实际消息 / 现象 | 源码与证据支持的解释 | 当前处理 |
+| --- | --- | --- |
+| 多个插件出现无效 Topic / Event，编号为 `-1` | 与共享事件转换回调失效一致；不能逐条解释为独立缺包 | 统一修复 DPF 回调的归属，等待实际桌面日志复验 |
+| `Report log plugin load log library failed!` | `reportlogworker.cpp` 动态加载可选 `deepin-event-log` 失败后告警并返回 | 不为消除告警而引入额外遥测库；不是已捕获的 WindowFrame 崩溃位置 |
+| `no top group exist: "10_advance"` | 设置 JSON 生成器会插入临时分组并继续构建 | 记录为分组配置告警，没有据此修改插件或关闭桌面服务 |
+| `dde-clipboard.service` 约 45.306 秒后启动超时 | 旧日志只证明超时；GUI/daemon 的 BusName 与源码相符，程序、两个 user unit 和三个 activation 文件均在实际 payload 中 | 根因未确定；新 VM 增加局部日志、unit 状态和 D-Bus 名称持有者采集 |
+
+剪贴板固定上游为 `dde-clipboard 6.1.39`、提交
+`e29ef6bd5d46fbe8fa227bc6300d6afc56e03bd8`。
+[GUI main.cpp](https://github.com/linuxdeepin/dde-clipboard/blob/e29ef6bd5d46fbe8fa227bc6300d6afc56e03bd8/dde-clipboard/main.cpp)
+先构造 MainWindow，之后才注册
+[user unit 要求的 D-Bus 名称](https://github.com/linuxdeepin/dde-clipboard/blob/e29ef6bd5d46fbe8fa227bc6300d6afc56e03bd8/misc/dde-clipboard.service.in)。
+初始化涉及 Display、Dock、Appearance、ClipboardLoader、DConfig 和区域监视器；
+任何实际阻塞点都需要局部运行证据才能确认。
+[daemon 的 Loader 注册](https://github.com/linuxdeepin/dde-clipboard/blob/e29ef6bd5d46fbe8fa227bc6300d6afc56e03bd8/dde-clipboard-daemon/clipboarddaemon.cpp)
+也与 activation 文件对应。目前不通过延长 timeout、改服务名或禁用剪贴板来掩盖未知原因。

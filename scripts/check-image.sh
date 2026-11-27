@@ -180,7 +180,8 @@ required = {'dde-desktop-comps', 'ddm', 'dde-session', 'dde-shell', 'treeland',
             'dracut-live', 'dracut-config-rescue', 'grub2-pc-modules', 'grub2-efi-x64-cdboot',
             'ddm-selinux', 'dde-daemon-selinux', 'dde-api-selinux', 'deepin-system-monitor-selinux',
             'selinux-policy-targeted', 'policycoreutils', 'libselinux-utils',
-            'cryptsetup', 'systemd-udev', 'desktop-backgrounds-basic', 'generic-logos', 'fedora-remix-logos'}
+            'cryptsetup', 'systemd-udev', 'deepin-desktop-schemas', 'desktop-backgrounds-basic',
+            'generic-logos', 'fedora-remix-logos'}
 assert required <= names, f'Required RPMs missing: {sorted(required - names)}'
 for package in data['dfm_hotfix']['runtime_rpms']:
     expected_package = f"{package['name']}\t{package['epoch']}:{package['version']}-{package['release']}\t{package['arch']}"
@@ -195,6 +196,15 @@ assert base_header == ['0', base['version'], base['release'], 'noarch', base['bi
 base_requires = subprocess.check_output(
     ['rpm', '--root', str(root), '--dbpath', '/usr/lib/sysimage/rpm', '-q', '--requires', base['name']], text=True).splitlines()
 assert 'system-logos' in base_requires and not any(line.split()[0] == 'fedora-logos' for line in base_requires if line.strip()), 'Desktop base still requires primary Fedora artwork'
+schemas = data['schemas_hotfix']
+assert (schemas['name'], schemas['version'], schemas['release']) == (
+    'deepin-desktop-schemas', '6.0.13', '1.1.remix1.fc45'), 'Unexpected schema repair identity'
+assert schemas.get('build_success') is True and schemas['strict_schema_check'].get('success') is True \
+    and schemas['strict_schema_check'].get('command') == 'glib-compile-schemas --strict --dry-run', 'The schema repair lacks its successful strict build check'
+schemas_header = subprocess.check_output(
+    ['rpm', '--root', str(root), '--dbpath', '/usr/lib/sysimage/rpm', '-q', schemas['name'],
+     '--qf', '%{EPOCHNUM}\t%{VERSION}\t%{RELEASE}\t%{ARCH}\t%{SOURCERPM}'], text=True).split('\t')
+assert schemas_header == ['0', schemas['version'], schemas['release'], 'noarch', schemas['binary_rpm']['source_rpm']], 'Payload schemas differ from the recorded temporary RPM'
 assert 'systemd-homed' not in names, 'systemd-homed is not supported by this image'
 assert 'fedora-logos' not in names, 'The Remix image must use generic system artwork and the Remix mark'
 print(f'Payload verified: Fedora 45, {len(names)} package names, no baked-in Live account.')
@@ -209,6 +219,7 @@ printf '%s\n' \
     'Persistent COPR repository: enabled, package-owned, verified key and RPM/TLS checks enabled' \
     'Encryption boot executable and generator: present, executable and owned by systemd-udev' \
     'Desktop wallpaper/logo assets: Fedora RPM owners and compiled defaults verified' \
+    'Desktop schema repair: native strict build result, installed RPM identity and compiled XF86Away binding verified' \
     'Conventional kernel-install and rescue hooks: preserved' \
     'Temporary Live account and empty password entries: absent' \
     'Embedded and external RPM manifests: identical' \
