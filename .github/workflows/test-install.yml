@@ -131,6 +131,9 @@ jobs:
             exit 1
           fi
 
+      - name: Check the graphical login controller regressions
+        run: /usr/bin/python3 scripts/test-vm-login.py
+
       - name: Download the exact compose artifact
         uses: actions/download-artifact@v4
         with:

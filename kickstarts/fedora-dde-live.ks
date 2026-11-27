@@ -162,15 +162,50 @@ dnf -y --exclude=systemd-homed group install dde-desktop
 # This specific hotfix was reviewed against 6.6.7-9; changed COPR input needs
 # a new comparison before composing another image.
 python3 - <<'PY'
-import json, subprocess
+import hashlib, json, subprocess
 from pathlib import Path
-hotfix = json.loads(Path('/usr/share/fedora-dde-remix/build-info.json').read_text())['dfm_hotfix']
+build_info = json.loads(Path('/usr/share/fedora-dde-remix/build-info.json').read_text())
+hotfix = build_info['dfm_hotfix']
 for package in hotfix['runtime_rpms']:
     actual = subprocess.check_output(['rpm', '-q', '--qf', '%{EPOCHNUM}\t%{VERSION}\t%{RELEASE}\t%{ARCH}', package['name']], text=True).split('\t')
     assert actual == ['0', hotfix['base_version'], hotfix['base_release'], 'x86_64'], 'Maintainer DFM input changed; review it before applying the temporary hotfix: ' + package['name']
+# DSysInfo's distribution file is a new Remix-owned path. Stop if another
+# package begins providing it, including an owned-but-missing file; never
+# replace an existing maintainer configuration to repair the image's logo.
+import os
+distribution = '/usr/share/deepin/distribution.info'
+assert not os.path.lexists(distribution), 'Existing distribution.info needs a fresh ownership review'
+owner = subprocess.run(['rpm', '-qf', distribution, '--qf', '%{NAME}\n'], text=True,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+assert owner.returncode == 1, 'Another RPM owns distribution.info; review before installing Remix defaults'
+# The maintainer base-data package hard-depends on the primary Fedora logo
+# package. First apply the pinned dependency-only noarch rebuild, then perform
+# one explicit artwork substitution. Refuse any additional package removal.
+base = build_info['desktop_base_hotfix']
+assert (base['name'], base['version'], base['base_release'], base['release']) == (
+    'deepin-desktop-base', '2026.10.28', '1.fc45', '1.1.remix1.fc45')
+old = subprocess.check_output(['rpm', '-q', '--qf', '%{EPOCHNUM}\t%{VERSION}\t%{RELEASE}\t%{ARCH}', base['name']], text=True).split('\t')
+assert old == ['0', base['version'], base['base_release'], 'noarch'], 'Maintainer desktop-base input changed; review before the temporary dependency adaptation'
+filename = base['binary_rpm']['filename']
+assert filename == 'deepin-desktop-base-2026.10.28-1.1.remix1.fc45.noarch.rpm'
+local_rpm = Path('/root/compose-rpms') / filename
+assert local_rpm.is_file() and not local_rpm.is_symlink()
+with local_rpm.open('rb') as stream:
+    assert hashlib.file_digest(stream, 'sha256').hexdigest() == base['binary_rpm']['sha256']
+subprocess.run(['dnf', '-y', 'install', str(local_rpm)], check=True)
+def package_names():
+    return set(subprocess.check_output(['rpm', '-qa', '--qf', '%{NAME}\n'], text=True).splitlines())
+before = package_names()
+assert 'fedora-logos' in before
+subprocess.run(['dnf', '-y', 'swap', 'fedora-logos', 'generic-logos'], check=True)
+after = package_names()
+assert before - after == {'fedora-logos'} and 'generic-logos' in after, 'The artwork substitution removed packages outside its explicit scope'
+print('PASS targeted artwork substitution: only fedora-logos removed; all desktop packages retained')
 PY
 dnf -y --exclude=systemd-homed install /root/compose-rpms/*.rpm
 python3 /root/check-comps.py
+glib-compile-schemas --strict /usr/share/glib-2.0/schemas
+/usr/libexec/fedora-dde-check-desktop-assets
 
 /root/configure-live.sh image
 install -m 0600 /dev/null /root/.fedora-dde-iso-build

@@ -36,6 +36,7 @@ actual_ref=$(git -c safe.directory=/installer -C /installer rev-parse HEAD)
 iso_ref=$(git -c safe.directory=/workspace -C /workspace rev-parse HEAD)
 export INSTALLER_REF FEDORA_RELEASE TARGET_ARCH CONFIG_VERSION iso_ref
 python3 /workspace/scripts/prepare-dfm-hotfix.py
+bash /workspace/scripts/build-desktop-base-hotfix.sh
 
 # The workflow checks the pinned archive digest and Actions run before making
 # this directory available read-only. No credentials enter this container.
@@ -104,7 +105,12 @@ if [[ $installer_input_mode == source-build ]]; then
         tee /output/logs/installer-rpmbuild.log
     installer_input_dir=$installer_top
 else
-    echo 'Reusing installer RPMs from verified Actions run 45837838480.'
+    python3 - <<'PY'
+import json
+from pathlib import Path
+info = json.loads(Path('/work/installer-input.json').read_text())
+print(f'Reusing installer RPMs from verified Actions run {info["run_id"]}.')
+PY
     installer_input_dir=/installer-rpms
 fi
 
@@ -203,6 +209,7 @@ data = {
     'comps': json.loads(Path('/work/comps-input.json').read_text()),
     'installer_input': json.loads(Path('/work/installer-input.json').read_text()),
     'dfm_hotfix': json.loads(Path('/work/dfm-hotfix-input.json').read_text()),
+    'desktop_base_hotfix': json.loads(Path('/work/desktop-base-hotfix-input.json').read_text()),
     'live_login': 'manual',
     'built_at_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
 }
@@ -215,8 +222,10 @@ config_source=/work/config-sources/fedora-dde-remix-config-$CONFIG_VERSION
 mkdir -p "$config_top"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS} "$config_source"/{config,scripts}
 install -m644 /workspace/LICENSE /workspace/README.md "$config_source/"
 install -m644 /workspace/config/{install-profile.json,fedora-dde-live.service,ddm-kmscon.conf,fedora-dde-remix.repo,RPM-GPG-KEY-fedora-dde-remix} "$config_source/config/"
+install -m644 /workspace/config/{treeland-background.json,appearance-background.json,99-fedora-dde-remix-background.gschema.override,distribution.info} "$config_source/config/"
 install -m755 /workspace/scripts/configure-live.sh "$config_source/scripts/"
 install -m755 /workspace/scripts/check-copr.py "$config_source/scripts/"
+install -m755 /workspace/scripts/check-desktop-assets.py "$config_source/scripts/"
 tar -C /work/config-sources -czf "$config_top/SOURCES/fedora-dde-remix-config-$CONFIG_VERSION.tar.gz" \
     "fedora-dde-remix-config-$CONFIG_VERSION"
 rpmbuild --define "_topdir $config_top" -ba /workspace/packaging/fedora-dde-remix-config.spec \

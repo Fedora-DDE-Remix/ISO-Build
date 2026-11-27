@@ -52,6 +52,14 @@ class Failure(RuntimeError):
     pass
 
 
+class SerialTimeout(Failure):
+    pass
+
+
+class GraphicalLoginDeadline(Failure):
+    pass
+
+
 def require(condition, message):
     if not condition:
         raise Failure(message)
@@ -85,6 +93,130 @@ def command(argv, *, timeout=120, check=True, input_text=None, env=None):
     return result
 
 
+def password_control(screen):
+    """Locate the control, rather than Treeland's separate password hint.
+
+    Treeland 0.12.0, commit 859a8c314f00947bc98168f46631ba10f9c7e6fa,
+    src/plugins/lockscreen/qml/UserInput.qml: a 220x30 passwordSlot and a
+    horizontally centered hintText 16 logical pixels below it. The recorded
+    1280x800 greeter's hint glyphs span 115 pixels; that also supplies a scale
+    estimate. The initial y estimate is refined using the actual focused
+    cursor before any password is entered. Never click the eye button.
+    """
+    words = screen["words"]
+    for first in words:
+        if first["text"].casefold().strip(".,:;!?") != "please":
+            continue
+        row = sorted((w for w in words if abs(w["top"] - first["top"]) <= max(first["height"], w["height"])),
+                     key=lambda w: w["left"])
+        labels = [w["text"].casefold().strip(".,:;!?") for w in row]
+        for index in range(len(row) - 2):
+            if labels[index:index + 3] != ["please", "enter", "password"]:
+                continue
+            hint = row[index:index + 3]
+            left = min(w["left"] for w in hint)
+            right = max(w["left"] + w["width"] for w in hint)
+            scale = (right - left) / 115
+            if not 0.75 <= scale <= 3:
+                continue
+            control = {"center_x": (left + right) / 2,
+                       "center_y": min(w["top"] for w in hint) - 31 * scale,
+                       "width": 220 * scale, "height": 30 * scale, "scale": scale,
+                       "anchor": "treeland-0.12.0-password-hint"}
+            if (control["width"] / 2 < control["center_x"] < screen["width"] - control["width"] / 2
+                    and control["height"] < control["center_y"] < screen["height"] - control["height"]):
+                return control
+    # The real in-field placeholder has a capital P. A lone lowercase
+    # "password" may be an incompletely recognized hint and is not safe.
+    for word in words:
+        if word["text"].strip(".,:;!?") == "Password":
+            scale = word["width"] / 48
+            if 0.75 <= scale <= 3:
+                return {"center_x": word["left"] + word["width"] / 2,
+                        "center_y": word["top"] + word["height"] / 2,
+                        "width": 220 * scale, "height": 30 * scale, "scale": scale,
+                        "anchor": "in-field-Password-placeholder"}
+    return None
+
+
+def same_password_control(first, second):
+    if not first or not second or first["anchor"] != second["anchor"]:
+        return False
+    return (abs(first["scale"] - second["scale"]) <= 0.1
+            and all(abs(first[key] - second[key]) <= 4 * max(first["scale"], second["scale"])
+                    for key in ("center_x", "center_y")))
+
+
+def password_pixels(path, control, baseline=None):
+    """Inspect only the field interior: exclude borders and the eye button.
+
+    The white, tall narrow cursor proves focus. Password bullets are small,
+    separated, approximately round components on one evenly spaced line.
+    Subtracting the focused empty frame removes wallpaper details. The count
+    is diagnostic, not proof of authentication or a font-dependent pass gate.
+    """
+    from PIL import Image
+    scale = control["scale"]
+    cx, cy = control["center_x"], control["center_y"]
+    with Image.open(path) as image:
+        rgb = image.convert("RGB")
+        left = max(0, round(cx - control["width"] / 2 + 26 * scale))
+        right = min(rgb.width, round(cx + control["width"] / 2 - 26 * scale))
+        top = max(0, round(cy - control["height"] / 2 + 2 * scale))
+        bottom = min(rgb.height, round(cy + control["height"] / 2 - 2 * scale))
+        pixels = rgb.load()
+        bright = {(x, y) for y in range(top, bottom) for x in range(left, right)
+                  if min(pixels[x, y]) >= 190 and max(pixels[x, y]) - min(pixels[x, y]) <= 40}
+        changed = None
+        if baseline is not None:
+            with Image.open(baseline) as empty:
+                empty = empty.convert("RGB")
+                require(empty.size == rgb.size, "The password field moved to a different display size.")
+                old = empty.load()
+                changed = {(x, y) for y in range(top, bottom) for x in range(left, right)
+                           if max(abs(a - b) for a, b in zip(pixels[x, y], old[x, y])) > 32}
+            bright.intersection_update(changed)
+    components = []
+    while bright:
+        pending = [bright.pop()]
+        points = []
+        while pending:
+            x, y = pending.pop()
+            points.append((x, y))
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    neighbor = (x + dx, y + dy)
+                    if neighbor in bright:
+                        bright.remove(neighbor)
+                        pending.append(neighbor)
+        xs, ys = zip(*points)
+        components.append({"x": min(xs), "y": min(ys), "width": max(xs) - min(xs) + 1,
+                           "height": max(ys) - min(ys) + 1, "pixels": len(points)})
+    all_carets = [c for c in components if c["width"] <= max(2, 2 * scale)
+                  and 8 * scale <= c["height"] <= 22 * scale]
+    carets = [c for c in all_carets if abs(c["x"] + c["width"] / 2 - cx) <= 12 * scale]
+    if changed is not None:
+        # Neither the old centered cursor blinking off nor the new cursor at
+        # the end of the text proves that characters reached the control.
+        cursor_columns = set(range(round(cx - 2 * scale), round(cx + 2 * scale) + 1))
+        for cursor in all_carets:
+            cursor_columns.update(range(cursor["x"] - 1, cursor["x"] + cursor["width"] + 1))
+        changed = {(x, y) for x, y in changed if x not in cursor_columns}
+    dots = sorted((c for c in components if 2 * scale <= c["width"] <= 10 * scale
+                   and 2 * scale <= c["height"] <= 10 * scale and c["pixels"] >= 3 * scale * scale
+                   and 0.6 <= c["width"] / c["height"] <= 1.7), key=lambda c: c["x"])
+    aligned = bool(dots) and (max(c["y"] for c in dots) - min(c["y"] for c in dots) <= 2 * scale
+                             and max(c["height"] for c in dots) - min(c["height"] for c in dots) <= 2 * scale
+                             and all(abs(c["y"] + c["height"] / 2 - cy) <= 8 * scale for c in dots))
+    gaps = [b["x"] - a["x"] for a, b in zip(dots, dots[1:])]
+    if gaps:
+        aligned = aligned and min(gaps) >= 3 * scale and max(gaps) - min(gaps) <= 2 * scale
+    return {"interior": [left, top, right, bottom], "carets": carets,
+            "masked_characters": len(dots) if aligned else 0,
+            "mask_components": dots if aligned else [],
+            "changed_non_cursor_pixels": len(changed) if changed is not None else None}
+
+
 def greeter_evidence(screen, session, user, *, password_required=False):
     """Recognize observed DDM controls without mistaking a getty for a greeter."""
     text = screen["text"]
@@ -94,6 +226,7 @@ def greeter_evidence(screen, session, user, *, password_required=False):
                     and len(re.findall(r"\b(?:service|target|socket|slice)\b", text, re.I)) >= 3)
     password_words = [w for w in screen["words"]
                       if w["text"].casefold().strip(".,:;!?") == "password"]
+    control = password_control(screen)
     labels = [w["text"].casefold().strip(".,:") for w in screen["words"]]
     user_words = [w for w, label in zip(screen["words"], labels) if label == user.casefold()]
     if user == LIVE_USER:
@@ -107,13 +240,14 @@ def greeter_evidence(screen, session, user, *, password_required=False):
         reason = "System startup messages are visible; they are not the DDM graphical greeter."
     elif not session["treeland"]:
         reason = "No running Treeland compositor was observed."
-    elif not password_words and (password_required or not user_words):
+    elif not control and (password_required or not user_words):
         reason = "No graphical password prompt or matching user tile was observed."
     else:
         reason = "Running Treeland and graphical login controls were observed."
     return {"ready": not terminal and not boot_console and bool(session["treeland"])
-                     and bool(password_words or (user_words and not password_required)),
-            "reason": reason, "password_words": password_words, "user_words": user_words}
+                     and bool(control or (user_words and not password_required)),
+            "reason": reason, "password_words": password_words, "user_words": user_words,
+            "password_control": control}
 
 
 def nonblack_frame(path):
@@ -232,11 +366,11 @@ class QMP:
                 raise Failure(f"QMP {name}: {response['error']}")
             return response.get("return")
 
-    def key(self, *keys):
-        self.execute("send-key", {"keys": [{"type": "qcode", "data": key} for key in keys], "hold-time": 30})
-        time.sleep(0.045)
+    def key(self, *keys, hold_time=30):
+        self.execute("send-key", {"keys": [{"type": "qcode", "data": key} for key in keys], "hold-time": hold_time})
+        time.sleep(0.045 if hold_time == 30 else hold_time / 1000 + 0.05)
 
-    def type(self, text):
+    def type(self, text, *, hold_time=30):
         plain = {" ": "spc", "-": "minus", "=": "equal", "/": "slash", ".": "dot", ",": "comma",
                  ";": "semicolon", "'": "apostrophe", "[": "bracket_left", "]": "bracket_right",
                  "\\": "backslash", "`": "grave_accent", "\n": "ret", "\t": "tab"}
@@ -246,13 +380,13 @@ class QMP:
                    "{": "bracket_left", "}": "bracket_right", "~": "grave_accent"}
         for char in text:
             if "A" <= char <= "Z":
-                self.key("shift", char.lower())
+                self.key("shift", char.lower(), hold_time=hold_time)
             elif char in shifted:
-                self.key("shift", shifted[char])
+                self.key("shift", shifted[char], hold_time=hold_time)
             elif char in plain:
-                self.key(plain[char])
+                self.key(plain[char], hold_time=hold_time)
             elif char.isascii() and char.isalnum():
-                self.key(char)
+                self.key(char, hold_time=hold_time)
             else:
                 raise Failure(f"Unsupported keyboard character: {char!r}")
 
@@ -316,7 +450,8 @@ class Serial:
                 value = match.group(0)
                 self.buffer = self.buffer[match.end():]
                 return before, value
-            require(time.monotonic() < deadline, f"Timed out waiting for serial pattern {pattern!r}; tail: {redact(self.buffer[-2000:])}")
+            if time.monotonic() >= deadline:
+                raise SerialTimeout(f"Timed out waiting for serial pattern {pattern!r}; tail: {redact(self.buffer[-2000:])}")
             require(self.process.poll() is None, "QEMU exited while waiting for the guest serial console.")
             self.receive(min(0.5, max(0, deadline - time.monotonic())))
 
@@ -381,12 +516,13 @@ class Guest:
         token = f"{self.counter}_{uuid.uuid4().hex[:8]}"
         begin, end = f"__VM_BEGIN_{token}__", f"__VM_END_{token}__"
         duration = self.report.remaining(timeout) if budget else timeout
+        deadline = time.monotonic() + duration
         # Separate physical lines keep the canonical TTY input below 4096 bytes,
         # including while uploading a base64-encoded guest helper via heredoc.
         wrapped = f"printf '\\n{begin}\\n'; {{\n{text}\n}}; vm_status=$?; printf '\\n{end}%s\\n' \"$vm_status\"\n"
         self.serial.send(wrapped)
         self.serial.expect(re.escape(begin) + r"\n", min(60, duration))
-        body, result = self.serial.expect(re.escape(end) + r"[0-9]+\n", duration)
+        body, result = self.serial.expect(re.escape(end) + r"[0-9]+\n", max(0, deadline - time.monotonic()))
         status = int(result[len(end):].strip())
         path = self.output / (name + ".log")
         path.write_text(redact(body))
@@ -716,9 +852,21 @@ class VM:
 
     def login_session(self, user, checkpoint, deadline, name):
         remaining = deadline - time.monotonic()
-        require(remaining > 0, "The graphical login deadline expired.")
-        session = self.guest.check("session", user, str(checkpoint["observed_at_monotonic_us"]),
-            checkpoint["boot_id"], timeout=min(45, remaining), name=name)
+        if remaining <= 0:
+            raise GraphicalLoginDeadline("The graphical login deadline expired before the next session observation.")
+        try:
+            session = self.guest.check("session", user, str(checkpoint["observed_at_monotonic_us"]),
+                checkpoint["boot_id"], timeout=min(45, remaining), name=name)
+        except SerialTimeout as error:
+            # Only a probe deliberately shortened by the stage's remaining
+            # budget can become a stage-deadline error. Keep its original
+            # framing failure as the cause; a full-budget timeout still fails
+            # as a serial error, as do a disconnected console or bad output.
+            if remaining < 45 and time.monotonic() >= deadline:
+                raise GraphicalLoginDeadline(
+                    f"The graphical login deadline expired during its final {remaining:.2f}s session observation; "
+                    "the original serial framing timeout is retained as the cause.") from error
+            raise
         require(not session["dde_shell_crashes"],
                 "The target user's dde-shell crashed after this graphical login began: "
                 + json.dumps(session["dde_shell_crashes"])[-4000:])
@@ -732,6 +880,8 @@ class VM:
         deadline = min(deadline, time.monotonic() + 120)
         observations = []
         previous_reason = None
+        previous_control = None
+        stable_since = None
         while time.monotonic() < deadline:
             session = self.login_session(user, checkpoint, deadline, f"{name}-session")
             if before_password:
@@ -739,18 +889,101 @@ class VM:
                         "A graphical user session appeared before password entry (unexpected autologin).")
             screen = self.screen(f"{name}-{len(observations) + 1:02d}", deadline=deadline)
             evidence = greeter_evidence(screen, session, user, password_required=password_required)
+            control = evidence["password_control"]
+            now = time.monotonic()
+            if not evidence["ready"] or not same_password_control(previous_control, control):
+                stable_since = now if control and evidence["ready"] else None
+            stable = stable_since is not None and now - stable_since >= 1
+            previous_control = control
             observations.append({"observed_at": utc(), "ready": evidence["ready"],
                 "reason": evidence["reason"], "screenshot": str(Path(screen["path"]).relative_to(self.output)),
-                "treeland": session["treeland"]})
+                "treeland": session["treeland"], "password_control": control, "control_stable": stable})
             (self.output / f"{name}-gate.json").write_text(json.dumps(observations, indent=2) + "\n")
             if evidence["reason"] != previous_reason:
                 log(evidence["reason"])
                 previous_reason = evidence["reason"]
-            if evidence["ready"]:
+            if evidence["ready"] and (not control or stable):
                 return screen, evidence
-            time.sleep(max(0, min(5, deadline - time.monotonic())))
+            time.sleep(max(0, min(1.2 if evidence["ready"] else 5, deadline - time.monotonic())))
         reason = observations[-1]["reason"] if observations else "The graphical login deadline expired."
         raise Failure("DDM greeter unavailable before password entry: " + reason)
+
+    def submit_graphical_password(self, screen, control, password, deadline):
+        require(control is not None, "No verified graphical password control was located.")
+        require(deadline - time.monotonic() >= 30,
+                "Too little graphical-login time remains to verify password focus and masked input safely.")
+        control = dict(control)
+        evidence = {"control": control, "password_entries": 0, "submissions": 0,
+                    "focus_frames": [], "masked_frames": [],
+                    "mask_analysis_role": "Diagnostic only; real DDM authentication and the desktop session remain required.",
+                    "layout_source": "linuxdeepin/treeland@859a8c314f00947bc98168f46631ba10f9c7e6fa:src/plugins/lockscreen/qml/UserInput.qml"}
+        evidence_path = self.output / "graphical-password-input.json"
+
+        def save():
+            evidence_path.write_text(json.dumps(evidence, indent=2) + "\n")
+
+        self.qmp.click(control["center_x"], control["center_y"], screen["width"], screen["height"])
+        # Clear the disposable field before recording its empty baseline.
+        # No credentials are sent until the centered caret confirms focus.
+        self.qmp.key("ctrl", "a", hold_time=100)
+        self.qmp.key("backspace", hold_time=100)
+        focus_deadline = min(deadline, time.monotonic() + 15)
+        while time.monotonic() < focus_deadline:
+            path = self.screenshot("ddm-password-focus")
+            pixels = password_pixels(path, control)
+            evidence["focus_frames"].append(dict(pixels, screenshot=str(path.relative_to(self.output))))
+            save()
+            if len(pixels["carets"]) == 1:
+                cursor = pixels["carets"][0]
+                # The caret is drawn only when passwordField.activeFocus is
+                # true. Its center refines the hint's glyph-based y estimate.
+                control["center_y"] = cursor["y"] + cursor["height"] / 2
+                baseline = path
+                evidence["empty_baseline_screenshot"] = str(path.relative_to(self.output))
+                break
+            time.sleep(max(0, min(0.4, focus_deadline - time.monotonic())))
+        else:
+            raise Failure("The password field did not show its focused empty cursor; no password was entered.")
+        # Slow only graphical credentials; GRUB and its proven input handshake
+        # retain their original key timing. No password retry is permitted.
+        self.qmp.type(password, hold_time=100)
+        evidence["password_entries"] = 1
+        evidence["entered_at"] = utc()
+        save()
+        # Password controls may briefly echo the last character. Wait for it
+        # to hide and collect two stable observations. Exact bullet counts
+        # are useful diagnostics, but the actual DDM session is the pass gate.
+        time.sleep(min(1.5, max(0, deadline - time.monotonic())))
+        masked_deadline = min(deadline, time.monotonic() + 20)
+        previous = None
+        while time.monotonic() < masked_deadline:
+            path = self.screenshot("ddm-password-masked")
+            pixels = password_pixels(path, control, baseline)
+            frame = dict(pixels, screenshot=str(path.relative_to(self.output)), observed_at=utc())
+            evidence["masked_frames"].append(frame)
+            save()
+            if pixels["changed_non_cursor_pixels"]:
+                observed = (pixels["masked_characters"], pixels["changed_non_cursor_pixels"])
+                if (previous is not None and observed[0] == previous[0]
+                        and abs(observed[1] - previous[1]) <= max(5, previous[1] * 0.2)):
+                    break
+                previous = observed
+            else:
+                previous = None
+            time.sleep(max(0, min(0.8, masked_deadline - time.monotonic())))
+        else:
+            raise Failure("The graphical password field remained empty or unstable relative to its focused empty frame; "
+                          "the password was entered once but was not submitted. See graphical-password-input.json.")
+        self.qmp.key("ret", hold_time=100)
+        evidence.update(submissions=1, submitted_at=utc(),
+                        masked_characters=pixels["masked_characters"],
+                        mask_count_matches=pixels["masked_characters"] == len(password),
+                        input_change_observed=True)
+        save()
+        path = self.screenshot("ddm-password-submitted")
+        evidence["after_submit_screenshot"] = str(path.relative_to(self.output))
+        save()
+        return evidence
 
     def desktop_login(self, user, password, timeout):
         deadline = time.monotonic() + self.report.remaining(timeout)
@@ -758,33 +991,33 @@ class VM:
         require(not initial["ready"] and not initial["ddm_sessions"], "A graphical user session appeared before password entry (unexpected autologin).")
         checkpoint = {key: initial[key] for key in ("boot_id", "observed_at_monotonic_us")}
         (self.output / "graphical-login-checkpoint.json").write_text(json.dumps(checkpoint, indent=2) + "\n")
-        # Keep the guest's normal greeter and compositor. OCR locates the
-        # password placeholder/user tile; no display-manager config is changed.
+        # Keep the guest's normal greeter and compositor. OCR and the observed
+        # control geometry locate the input, never its explanatory hint.
         screen, evidence = self.wait_greeter(user, deadline, "ddm-login",
             checkpoint=checkpoint, before_password=True)
-        if not evidence["password_words"]:
+        if not evidence["password_control"]:
             # Click only an observed user tile, then wait for its password UI.
             word = evidence["user_words"][0]
             self.qmp.click(word["left"] + word["width"] / 2, word["top"] + word["height"] / 2,
                            screen["width"], screen["height"])
             screen, evidence = self.wait_greeter(user, deadline, "ddm-login-password",
                 checkpoint=checkpoint, password_required=True, before_password=True)
-        word = evidence["password_words"][0]
-        self.qmp.click(word["left"] + word["width"] / 2, word["top"] + word["height"] / 2,
-                       screen["width"], screen["height"])
-        self.qmp.key("ctrl", "a")
-        self.qmp.type(password)
-        self.qmp.key("ret")
+        input_evidence = self.submit_graphical_password(screen, evidence["password_control"], password, deadline)
         # Submit once. A slow/black authenticated session never receives a
         # second password; the remaining original deadline is for observation.
         last = None
         authenticated = False
         visible_since = None
+        observation_deadline_error = None
         while time.monotonic() < deadline:
             time.sleep(max(0, min(3, deadline - time.monotonic())))
             if time.monotonic() >= deadline:
                 break
-            last = self.login_session(user, checkpoint, deadline, "session-login-progress")
+            try:
+                last = self.login_session(user, checkpoint, deadline, "session-login-progress")
+            except GraphicalLoginDeadline as error:
+                observation_deadline_error = error
+                break
             if any(s.get("Service") == "ddm" and s.get("Class") == "user" for s in last["sessions"]):
                 authenticated = True
             if last["ready"]:
@@ -802,16 +1035,18 @@ class VM:
                         require(stable["ready"], "The graphical desktop session stopped during the stability check.")
                         return {"attempts": 1, "session": stable,
                                 "nonblack_frame": frame, "nonblack_stable_seconds": round(now - visible_since, 3),
-                                "crash_check_checkpoint": checkpoint}
+                                "crash_check_checkpoint": checkpoint, "password_input": input_evidence}
                 else:
                     visible_since = None
             else:
                 visible_since = None
-        if authenticated:
-            raise Failure("DDM authenticated the user, but no stable session with nonblack desktop frames "
-                          "appeared before the original graphical login deadline; see desktop-frame-events.jsonl.")
-        raise Failure("DDM did not create a stable Wayland + dde-shell desktop after password login; "
-                      + json.dumps(last)[-3000:])
+        message = ("DDM authenticated the user, but no stable session with nonblack desktop frames appeared "
+                   "before the graphical login deadline; see desktop-frame-events.jsonl." if authenticated else
+                   "DDM did not create an authenticated Wayland + dde-shell session before the graphical login "
+                   "deadline after one focused password submission. Last completed observation: " + json.dumps(last)[-3000:])
+        if observation_deadline_error:
+            message += " The final shortened observation also exhausted the stage deadline; its original framing error is retained."
+        raise Failure(message) from observation_deadline_error
 
     def poweroff(self):
         framing_error = None
@@ -991,6 +1226,9 @@ def main():
         try:
             with report.stage("live-ddm-password-login-and-desktop"):
                 report.data["evidence"]["live_login"] = vm.desktop_login(LIVE_USER, LIVE_PASSWORD, args.desktop_timeout)
+            with report.stage("live-desktop-assets"):
+                report.data["evidence"]["live_desktop_assets"] = vm.guest.check("desktop-assets", LIVE_USER, timeout=90)
+            with report.stage("live-native-pam"):
                 report.data["evidence"]["live_pam"] = vm.guest.check("pam", LIVE_USER, timeout=180)
         except Failure as error:
             record_desktop_failure("live", error)
@@ -1041,6 +1279,9 @@ def main():
         try:
             with report.stage("installed-ddm-password-login-and-desktop"):
                 report.data["evidence"]["installed_login"] = vm.desktop_login(TEST_USER, TEST_PASSWORD, args.desktop_timeout)
+            with report.stage("installed-desktop-assets"):
+                report.data["evidence"]["installed_desktop_assets"] = vm.guest.check("desktop-assets", TEST_USER, timeout=90)
+            with report.stage("installed-native-pam"):
                 report.data["evidence"]["installed_pam"] = vm.guest.check("pam", TEST_USER, timeout=180)
                 policy = vm.guest.check("baseline", "installed", installed["root_uuid"], timeout=300, name="after-login-enforcing")
                 report.data["evidence"]["enforcing_after_desktop_login"] = policy["selinux"]

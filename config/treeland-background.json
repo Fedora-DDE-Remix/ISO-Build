@@ -1,0 +1,9 @@
+{
+  "magic": "dsg.config.override",
+  "version": "1.0",
+  "contents": {
+    "defaultBackground": {
+      "value": "/usr/share/backgrounds/images/earth_from_space.jpg"
+    }
+  }
+}

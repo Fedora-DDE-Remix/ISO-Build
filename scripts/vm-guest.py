@@ -170,6 +170,7 @@ def baseline(phase, expected_uuid=""):
     run(["systemctl", "is-active", "ddm.service"])
     security = policy_check()
     copr = json.loads(run(["/usr/libexec/fedora-dde-check-copr"]).stdout)
+    assets = json.loads(run(["/usr/libexec/fedora-dde-check-desktop-assets"]).stdout)
     enabled_repositories = json.loads(run(["dnf", "--cacheonly", "repo", "list", "--enabled", "--json"], timeout=60).stdout)
     require(isinstance(enabled_repositories, list)
             and sum(repo.get("id") == copr["repository"] and repo.get("is_enabled") is True
@@ -181,6 +182,7 @@ def baseline(phase, expected_uuid=""):
     result = {"phase": phase, "scenario": scenario, "uefi": uefi,
               "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
               "cmdline": cmdline, "root": root, "profile": profile, "selinux": security, "copr": copr,
+              "desktop_assets": assets,
               "build_info": json.loads(Path("/usr/share/fedora-dde-remix/build-info.json").read_text()),
               "packages": run(["rpm", "-q", "ddm", "treeland", "dde-session", "dde-shell",
                                 "selinux-policy-targeted"], check=False).stdout.splitlines()}
@@ -191,6 +193,11 @@ def baseline(phase, expected_uuid=""):
                 "The tested DFM package differs from the verified temporary hotfix: " + package["name"])
         hotfix_packages.append(package["name"] + "-" + package["version"] + "-" + package["release"])
     result["verified_dfm_hotfix_packages"] = hotfix_packages
+    base = result["build_info"]["desktop_base_hotfix"]
+    actual_base = run(["rpm", "-q", "--qf", "%{EPOCHNUM}\t%{VERSION}\t%{RELEASE}\t%{ARCH}\t%{SOURCERPM}", base["name"]]).stdout.split("\t")
+    require(actual_base == ["0", base["version"], base["release"], "noarch", base["binary_rpm"]["source_rpm"]],
+            "The desktop base package differs from the verified temporary dependency adaptation.")
+    result["verified_desktop_base_hotfix"] = base["name"] + "-" + base["version"] + "-" + base["release"]
     user = "liveuser" if phase == "live" else USERNAME
     account = pwd.getpwnam(user)
     groups = [grp.getgrgid(g).gr_name for g in os.getgrouplist(user, account.pw_gid)]
@@ -634,6 +641,62 @@ def pam_check(user):
             "session": "verified separately through the real graphical login"}
 
 
+def desktop_assets(user):
+    """Read effective defaults and the compositor's generated user background."""
+    require(user in {"liveuser", USERNAME}, "Unexpected desktop asset test user.")
+    account = pwd.getpwnam(user)
+    runtime = Path(f"/run/user/{account.pw_uid}")
+    require((runtime / "bus").exists(), "The desktop user's session bus is missing.")
+    result = json.loads(run(["/usr/libexec/fedora-dde-check-desktop-assets"]).stdout)
+    appearance_prefix = ["runuser", "-u", user, "--", "env", "HOME=" + account.pw_dir,
+              "XDG_RUNTIME_DIR=" + str(runtime),
+              "DBUS_SESSION_BUS_ADDRESS=unix:path=" + str(runtime / "bus"),
+              "dde-dconfig", "get"]
+    compositor_pid = int(run(["systemctl", "show", "treeland.service", "-p", "MainPID", "--value"]).stdout.strip())
+    compositor = [p for p in processes() if p["pid"] == compositor_pid and p["exe"] == "/usr/bin/treeland"]
+    require(len(compositor) == 1, "Cannot identify the actual Treeland service process.")
+    compositor_account = pwd.getpwuid(compositor[0]["uid"])
+    # These Treeland keys are non-global DConfig values. The daemon running
+    # the compositor owns the cache; /<login-user> is only its subpath. Read
+    # through that actual UID, not a different cache belonging to login-user.
+    compositor_prefix = ["runuser", "-u", compositor_account.pw_name, "--", "env",
+                         "HOME=" + compositor_account.pw_dir, "dde-dconfig", "get"]
+    requests = {
+        "treeland_default": ["-a", "org.deepin.dde.treeland", "-r", "org.deepin.dde.treeland.user",
+                             "-s", "/" + user, "-k", "defaultBackground"],
+        "appearance_default": ["-a", "org.deepin.dde.appearance", "-r", "org.deepin.dde.appearance",
+                               "-k", "Background_Uris"],
+        "generated_wallpaper": ["-a", "org.deepin.dde.treeland", "-r", "org.deepin.dde.treeland.user",
+                                "-s", "/" + user, "-k", "wallpaperConfig"],
+    }
+    observed = {}
+    missing_defaults = ("/usr/share/backgrounds/default_background.jpg",
+                        "/usr/share/backgrounds/deepin/desktop.jpg",
+                        "/usr/share/wallpapers/deepin/deepin-default.jpg")
+    for name, request in requests.items():
+        prefix = appearance_prefix if name == "appearance_default" else compositor_prefix
+        deadline = time.monotonic() + 20
+        while True:
+            value = run(prefix + request, timeout=30).stdout.strip()
+            # wallpaperConfig is generated asynchronously by the compositor.
+            # Only an empty value may be retried; wrong nonempty paths fail.
+            if name != "generated_wallpaper" or value not in {"", '""', '"{}"', '"[]"'}:
+                break
+            require(time.monotonic() < deadline, "Treeland did not generate the user's wallpaper configuration.")
+            time.sleep(1)
+        require(len(value) <= 131072 and result["wallpaper"] in value
+                and not any(path in value for path in missing_defaults),
+                f"The effective user background is missing or still references an absent file: {name}: {value[:2000]}")
+        # Retain native CLI output instead of guessing its display encoding.
+        # The expected resource is not a CLI argument: it must come from the
+        # actual value returned for this one requested key.
+        observed[name] = value
+    result.update(user=user, uid=account.pw_uid, compositor_pid=compositor_pid,
+                  compositor_uid=compositor_account.pw_uid, effective_dconfig=observed,
+                  effective_user_background_verified=True)
+    return result
+
+
 def diagnostics():
     boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip().replace("-", "")
     commands = {"journal": ["journalctl", "-b", "--no-pager", "-n", "250", "-o", "short-monotonic"],
@@ -644,7 +707,13 @@ def diagnostics():
                 "avc": ["ausearch", "-m", "AVC,USER_AVC", "-ts", "boot", "--raw"],
                 "coredumps": ["coredumpctl", "list", "--no-pager", "_BOOT_ID=" + boot_id],
                 "disks": ["lsblk", "-f"], "mounts": ["findmnt"],
-                "treeland_units": ["systemctl", "cat", "treeland.service"]}
+                "treeland_units": ["systemctl", "cat", "treeland.service"],
+                "wallpaper_factory": ["journalctl", "-b", "--no-pager", "-n", "100", "-o", "short-monotonic",
+                                      "_EXE=/usr/bin/treeland-wallpaper-factory"],
+                "desktop_asset_files": ["stat", "--", "/usr/share/backgrounds/images/earth_from_space.jpg",
+                                        "/usr/share/pixmaps/fedora-remix-logos/Fedora-Remix-Black-Blue.png",
+                                        "/usr/share/pixmaps/fedora-remix-logos/Fedora-Remix-Transparent-Blue.png",
+                                        "/usr/share/deepin/distribution.info"]}
     for user in ("liveuser", USERNAME):
         try:
             uid = pwd.getpwnam(user).pw_uid
@@ -659,6 +728,16 @@ def diagnostics():
         # this boot/user, and -1 bounds info to the latest matching crash.
         commands[f"dde_shell_{user}_coreinfo"] = ["coredumpctl", "--no-pager", "-1", "info",
             "_BOOT_ID=" + boot_id, f"COREDUMP_UID={uid}", "COREDUMP_EXE=/usr/bin/dde-shell"]
+        commands[f"clipboard_{user}_journal"] = ["journalctl", "-b", "--no-pager", "-n", "100",
+            "-o", "short-monotonic", f"_UID={uid}", "_SYSTEMD_USER_UNIT=dde-clipboard.service",
+            "+", f"_BOOT_ID={boot_id}", f"_UID={uid}", "_SYSTEMD_USER_UNIT=dde-clipboard-daemon.service"]
+        user_prefix = ["runuser", "-u", user, "--", "env", f"XDG_RUNTIME_DIR=/run/user/{uid}",
+                       f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus"]
+        commands[f"desktop_user_units_{user}"] = user_prefix + ["systemctl", "--user", "show",
+            "dde-clipboard.service", "dde-clipboard-daemon.service",
+            "dde-shell-plugin@org.deepin.ds.desktop.service", "--no-pager",
+            "-p", "Id,ActiveState,SubState,Result,MainPID,BusName,ExecMainStatus"]
+        commands[f"user_bus_owners_{user}"] = user_prefix + ["busctl", "--user", "list", "--no-pager"]
     result = {"dde_shell_processes": [p for p in processes() if p["exe"] == "/usr/bin/dde-shell"]}
     deadline = time.monotonic() + 160
     # Collect the specific crash trace before general journal output can spend
@@ -701,6 +780,8 @@ def main():
     action = args.pop(0)
     if action == "baseline":
         result = baseline(*args)
+    elif action == "desktop-assets":
+        result = desktop_assets(*args)
     elif action == "session":
         result = session(*args)
     elif action == "prepare":

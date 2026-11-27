@@ -4,11 +4,14 @@
 `Fedora-DDE-Remix/fedora-dde-installer`，在当前 Live 会话内完成安装、用户、
 密码、时区和键盘配置，由用户决定何时重启。
 
-**45.20261127 已生成 ISO，但桌面验收失败，尚未作为正式 Release 发布。**
-严格实测捕获了 DDE 桌面插件的 SIGSEGV 和黑屏；安装、分区和硬盘启动的独立结果见
-[本版验证报告](VALIDATION-45.20261127.md)。
+**当前配方为 45.20261127.2 候选，正式 Release 尚未发布。**
+旧版 `45.20261127` 的真实桌面插件 SIGSEGV 和存储测试见
+[原版验证报告](VALIDATION-45.20261127.md)。`45.20261127.1` 已构建 ISO，但其
+首个 VM 在输入登录密码前后失败，未进入安装阶段；实际证据与控制器定位缺陷见
+[上一候选报告](VALIDATION-45.20261127.1.md)。当前配方修复输入定位，并补齐实际
+镜像中缺失的壁纸与 Remix 标识资源，仍须通过新 ISO 的九组真实 VM 验收。
 
-**45.20261127 版保持 SELinux Enforcing**：Live 和安装目标使用 Fedora 原生 PAM，
+**本系列候选保持 SELinux Enforcing**：Live 和安装目标使用 Fedora 原生 PAM，
 系统配置为 `SELINUX=enforcing`。Live 启动参数显式包含 `selinux=1 enforcing=1`；
 安装器为目标系统生成正常磁盘引导参数，使用 Fedora 默认的 Enforcing 行为。
 镜像使用维护者发布的 DDM 和 DDE SELinux 策略包，构建时验证策略注册和文件标签。
@@ -48,7 +51,7 @@ DNF 即使跳过缺失的组包并返回成功，也不能绕过这项检查。
 
 ### 安装后默认保留 COPR
 
-45.20261127.1 配方将 Fedora DDE Remix 的源文件与已核验公钥纳入
+从 45.20261127.1 起，配方将 Fedora DDE Remix 的源文件与已核验公钥纳入
 `fedora-dde-remix-config` RPM。标准 COPR 仓库 ID 保持为
 `copr:copr.fedorainfracloud.org:mozixun:Fedora-DDE-Remix`，默认启用，并保留
 `gpgcheck=1` 和 `sslverify=1`。地址使用 `$releasever`、`$basearch`；安装目标
@@ -57,7 +60,8 @@ Live 与硬盘启动测试再用 DNF 检查源确实处于启用状态。
 
 ### LUKS2 加密安装
 
-新版配方包含 `cryptsetup` 和 `systemd-cryptsetup`，配合安装器 0.3.0 的加密入口。
+新版配方包含 `cryptsetup` 和 Fedora 45 的 `systemd-udev`，后者提供
+`/usr/bin/systemd-cryptsetup` 与解锁 generator，配合安装器 0.3.0 的加密入口。
 ESP 与独立 `/boot` 保持明文；根和个人数据位于同一个 LUKS2 容器中，Btrfs 使用
 root/home 子卷，ext4/XFS 的 home 是根内目录。开机交互输入口令解锁。
 加密模式暂不接受独立明文 home、var、其他数据挂载和磁盘 swap，保留默认 zram。
@@ -67,6 +71,21 @@ root/home 子卷，ext4/XFS 的 home 是根内目录。开机交互输入口令�
 不存放自动解锁密钥。小盘检查额外扣除 32 MiB 加密头，再应用原有 12 GiB 内层根
 下限和 payload 实际占用。下面新增的加密场景必须有新镜像实测报告，不能沿用旧版
 未加密安装报告。每次构建先运行 16 GB 加密 Btrfs 场景，成功后才运行其余八组。
+
+### 默认壁纸与 Remix 标识
+
+45.20261127.2 使用 `desktop-backgrounds-basic` 提供的 JPEG 壁纸和
+`fedora-remix-logos` 的 Remix 标识。配置 RPM 管理 Treeland、appearance DConfig、
+GSettings 的默认路径以及 DSysInfo 的 `distribution.info`；镜像检查会读取实际文件、
+RPM 所有者及编译后的 GSettings 默认值，VM 在真实登录后继续核对用户的有效 DConfig。
+新默认值不重置已有用户的自选壁纸。
+
+系统通用图形资源由 `generic-logos` 提供。维护者的 `deepin-desktop-base` 当前硬性
+依赖主 Fedora 标识包，因此本仓库仅对固定 `2026.10.28-1` SPEC 的依赖和 Release
+做临时调整：依赖改为 `system-logos`，版本为 `2026.10.28-1.1.remix1.fc45`。
+源码和其余打包行为保持一致；配方先安装这个 noarch 包，再定向替换系统图形资源，
+验证没有移除其他桌面包。来源、原 SPEC、临时 SPEC、源码归档及 SRPM 随构建证据保留，
+详见[临时依赖调整](packaging/hotfix/deepin-desktop-base/README.md)。
 
 ## Live 登录与 PAM
 
