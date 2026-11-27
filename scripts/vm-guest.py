@@ -21,6 +21,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 
 
@@ -37,6 +38,8 @@ POLICIES = {"ddm", "dde_daemon", "dde_api", "deepin_system_monitor"}
 STAGES = ("preflight", "partition", "copy", "system", "ready", "configure", "finalize")
 SCENARIOS = {"uefi-btrfs", "bios-ext4", "bios-mbr-ext4", "uefi-xfs-home-swap", "uefi-preserve", "uefi-small",
              "uefi-luks-btrfs-small", "bios-luks-ext4", "uefi-luks-xfs"}
+STORAGE_EVIDENCE_NAME = "storage-cleanup-evidence.json"
+STORAGE_EVIDENCE_LIMIT = 192 * 1024
 
 
 def require(condition, message):
@@ -719,6 +722,331 @@ def run_backend(stage):
             os.close(descriptor)
 
 
+def storage_mountinfo(text):
+    """Parse kernel mountinfo, including its octal path escaping and Btrfs dev IDs."""
+    def unescape(value):
+        return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), value)
+
+    result = []
+    for line in text.splitlines():
+        before, separator, after = line.partition(" - ")
+        fields, filesystem = before.split(), after.split()
+        if not separator or len(fields) < 6 or len(filesystem) < 3:
+            raise ValueError("Malformed kernel mountinfo entry.")
+        result.append({"mount_id": fields[0], "parent_id": fields[1], "major_minor": fields[2],
+                       "root": unescape(fields[3]), "mountpoint": unescape(fields[4]),
+                       "options": fields[5], "propagation": fields[6:], "fstype": filesystem[0],
+                       "source": unescape(filesystem[1]), "super_options": filesystem[2]})
+    return result
+
+
+class StorageProbeStopped(Exception):
+    """Only the diagnostic sample stops; the original installer error remains."""
+
+
+class StorageCleanupProbe:
+    """Bounded read-only evidence for a failed teardown, never an automatic fix.
+
+    The parent also applies GNU timeout to this whole process group. That hard
+    bound covers a procfs/stat operation which cannot honor our soft deadline.
+    No cmdline, environment, file contents, keyslot contents or dm table are read.
+    """
+
+    def __init__(self, seconds=15, *, proc=Path("/proc"), sys_block=Path("/sys/class/block")):
+        self.started = time.monotonic()
+        self.deadline = self.started + seconds
+        self.proc, self.sys_block = proc, sys_block
+        self.result = {"schema": 1, "reason": "installer-finalize-failed", "collection_complete": False,
+                       "budget_seconds": seconds, "errors": [], "commands": {}, "namespaces": [],
+                       "process_references": [], "pids_examined": 0, "pids_unavailable": 0,
+                       "fds_examined": 0, "namespaces_examined": 0}
+        self.sources, self.filesystem_devices, self.block_devices = set(), set(), set()
+        self.target = "/target"
+        self.namespace_cache = {}
+        self.detail_bytes = 0
+
+    def check_budget(self):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise StorageProbeStopped("The storage evidence collection reached its wall-clock budget.")
+        return remaining
+
+    def error(self, stage, error):
+        if len(self.result["errors"]) < 32:
+            self.result["errors"].append({"stage": stage, "error": str(error)[:500]})
+
+    def checkpoint(self, stage):
+        self.result["last_stage"] = stage
+        self.result["elapsed_seconds"] = round(time.monotonic() - self.started, 3)
+        storage_save_evidence(self.result)
+        print("VMTEST_STORAGE_PROBE_STAGE=" + json.dumps({"stage": stage,
+            "elapsed_seconds": self.result["elapsed_seconds"]}), flush=True)
+
+    def text(self, path, limit):
+        self.check_budget()
+        with path.open("rb") as stream:
+            data = stream.read(limit + 1)
+        self.check_budget()
+        if len(data) > limit:
+            raise StorageProbeStopped(f"The bounded metadata read exceeded {limit} bytes: {path}.")
+        return data.decode("utf-8", errors="replace")
+
+    def append_detail(self, destination, value):
+        size = len(json.dumps(value, ensure_ascii=True).encode())
+        if self.detail_bytes + size > 80 * 1024:
+            raise StorageProbeStopped("The storage namespace/reference evidence reached its output limit.")
+        destination.append(value)
+        self.detail_bytes += size
+
+    def command(self, name, argv, *, cap=3, limit=8192):
+        """Fixed read-only commands; anonymous output files avoid unbounded RAM."""
+        self.check_budget()
+        try:
+            with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
+                try:
+                    value = subprocess.run(argv, stdout=output, stderr=errors, check=False,
+                                           timeout=min(cap, self.check_budget()),
+                                           env=dict(os.environ, LC_ALL="C", LANG="C"))
+                    status = value.returncode
+                except subprocess.TimeoutExpired:
+                    status = None
+                    self.error(name, "The read-only command exceeded its remaining collection budget.")
+                output.seek(0)
+                errors.seek(0)
+                data, detail = output.read(limit + 1), errors.read(2049)
+            self.result["commands"][name] = {"status": status,
+                "stdout": data[:limit].decode("utf-8", errors="replace"),
+                "stderr": detail[:2048].decode("utf-8", errors="replace"),
+                "output_truncated": len(data) > limit or len(detail) > 2048}
+            if status not in (0, None):
+                self.error(name, f"The read-only command exited {status}.")
+        except OSError as error:
+            self.error(name, error)
+
+    def prepare(self, state):
+        record = state.get("encrypted_root") or {}
+        self.target = str(state.get("target") or "/target")
+        require(self.target == "/target", "Unexpected installation target in storage evidence state.")
+        metadata = {key: record.get(key) for key in
+                    ("name", "mapper", "device", "uuid", "fstype", "filesystem_uuid") if key in record}
+        owned = state.get("owned_mounts", [])
+        require(isinstance(owned, list) and len(owned) <= 32 and all(isinstance(point, str)
+                and (point == self.target or point.startswith(self.target + "/")) for point in owned),
+                "Invalid owned mount metadata in storage evidence state.")
+        identity = state.get("mount_identity", {})
+        self.result["installation"] = {"phase": state.get("phase"), "target": self.target,
+            "owned_mounts": owned, "encrypted_root": metadata,
+            "mount_identity": {key: identity.get(key) for key in
+                               ("source", "major_minor", "fstype", "uuid", "fsroot") if key in identity}}
+        sources = [metadata.get("mapper")]
+        root = next((entry for entry in state.get("mounts", []) if entry.get("mountpoint") == "/"), {})
+        sources.append(root.get("device"))
+        identifier = metadata.get("filesystem_uuid") or root.get("uuid")
+        if identifier and re.fullmatch(r"[0-9A-Fa-f-]{4,64}", identifier):
+            sources.append("/dev/disk/by-uuid/" + identifier)
+        for source in filter(None, sources):
+            require(isinstance(source, str) and re.fullmatch(r"/dev/[A-Za-z0-9_./:+-]+", source)
+                    and ".." not in Path(source).parts, "Invalid device metadata in storage evidence state.")
+            self.sources.update((source, os.path.realpath(source)))
+            try:
+                value = os.stat(source)
+                if stat.S_ISBLK(value.st_mode):
+                    self.block_devices.add(value.st_rdev)
+            except FileNotFoundError:
+                continue  # A disappeared mapper is itself useful evidence.
+        identities = [state.get("mount_identity", {})]
+        identities.extend(value for value in state.get("mount_identities", {}).values()
+                          if value.get("source") in self.sources)
+        for identity in identities:
+            number = str(identity.get("major_minor", ""))
+            if re.fullmatch(r"[0-9]+:[0-9]+", number):
+                self.filesystem_devices.add(os.makedev(*map(int, number.split(":"))))
+        self.result["expected_filesystem_devices"] = sorted(
+            f"{os.major(value)}:{os.minor(value)}" for value in self.filesystem_devices)
+        self.result["expected_block_devices"] = sorted(
+            f"{os.major(value)}:{os.minor(value)}" for value in self.block_devices)
+        self.result["canonical_sources"] = sorted(self.sources)
+        return metadata
+
+    def matches_mount(self, mount):
+        number = mount["major_minor"]
+        device_match = bool(re.fullmatch(r"[0-9]+:[0-9]+", number)) and (
+            os.makedev(*map(int, number.split(":"))) in self.filesystem_devices)
+        source = mount["source"]
+        source_match = source in self.sources or (source.startswith("/dev/") and
+                                                  os.path.realpath(source) in self.sources)
+        point = mount["mountpoint"]
+        path_match = point == self.target or point.startswith(self.target + "/")
+        return device_match or source_match or path_match
+
+    def reference(self, path, kind, *, fd=None):
+        self.check_budget()
+        value = path.stat()  # Metadata only; never open a target or an FD's contents.
+        link = os.readlink(path)
+        reasons = []
+        if stat.S_ISBLK(value.st_mode) and value.st_rdev in self.block_devices:
+            reasons.append("mapper-block-device")
+        if value.st_dev in self.filesystem_devices:
+            reasons.append("target-filesystem-device")
+        if link == self.target or link.startswith(self.target + "/"):
+            reasons.append("target-path")
+        if not reasons:
+            return None
+        return {"kind": kind, **({"fd": int(fd)} if fd is not None else {}), "path": link[:4096],
+                "device": f"{os.major(value.st_dev)}:{os.minor(value.st_dev)}", "matched_by": reasons}
+
+    def scan_process(self, directory):
+        self.check_budget()
+        pid = int(directory.name)
+        namespace = os.readlink(directory / "ns/mnt")
+        if namespace not in self.namespace_cache:
+            mounts = [mount for mount in storage_mountinfo(self.text(directory / "mountinfo", 256 * 1024))
+                      if self.matches_mount(mount)]
+            group = {"namespace": namespace, "representative_pid": pid, "pids": [], "mounts": mounts}
+            self.namespace_cache[namespace] = group
+            self.result["namespaces_examined"] += 1
+            if mounts:
+                self.append_detail(self.result["namespaces"], group)
+        group = self.namespace_cache[namespace]
+        if group["mounts"]:
+            if len(group["pids"]) >= 1024:
+                raise StorageProbeStopped("Too many processes share a matching mount namespace.")
+            group["pids"].append(pid)
+        references = []
+        for kind in ("root", "cwd", "exe"):
+            try:
+                value = self.reference(directory / kind, kind)
+                if value:
+                    references.append(value)
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            except OSError as error:
+                self.error(f"pid-{pid}-{kind}", error)
+        for descriptor in (directory / "fd").iterdir():
+            self.check_budget()
+            if not descriptor.name.isdecimal():
+                continue
+            self.result["fds_examined"] += 1
+            if self.result["fds_examined"] > 32768:
+                raise StorageProbeStopped("The storage evidence reached its file-descriptor count limit.")
+            try:
+                value = self.reference(descriptor, "fd", fd=descriptor.name)
+                if value:
+                    if len(references) >= 64:
+                        raise StorageProbeStopped(f"PID {pid} exceeded the matching reference output limit.")
+                    references.append(value)
+            except (FileNotFoundError, ProcessLookupError):
+                continue  # A descriptor may close while the process remains alive.
+            except OSError as error:
+                self.error(f"pid-{pid}-fd", error)
+        if references or group["mounts"]:
+            self.append_detail(self.result["process_references"], {
+                "pid": pid, "uid": directory.stat().st_uid, "namespace": namespace,
+                "comm": self.text(directory / "comm", 256).strip(),
+                "cgroup": self.text(directory / "cgroup", 4096).splitlines(), "references": references})
+
+    def collect(self):
+        try:
+            state = json.loads(self.text(STATE, 1024 * 1024))
+            metadata = self.prepare(state)
+            self.checkpoint("identity")
+            # Capture open counts/holders before slower per-process scans.
+            name = metadata.get("name")
+            if name:
+                require(re.fullmatch(r"luks-[0-9A-Fa-f-]{36}", name) is not None,
+                        "Invalid mapper name in storage evidence state.")
+                self.command("dm_info", ["dmsetup", "info", "--columns", "--noheadings",
+                    "--separator", ":", "--options", "name,major,minor,open,segments,uuid", name], cap=2)
+                self.command("crypt_status", ["cryptsetup", "status", name], cap=2)
+            holders = []
+            for device in self.block_devices:
+                self.check_budget()
+                for block in self.sys_block.iterdir():
+                    try:
+                        if self.text(block / "dev", 64).strip() != f"{os.major(device)}:{os.minor(device)}":
+                            continue
+                        holders.append({"device": block.name,
+                                        "holders": sorted(path.name for path in (block / "holders").iterdir())})
+                    except (FileNotFoundError, ProcessLookupError):
+                        continue
+            self.result["block_holders"] = holders
+            self.checkpoint("device-open-count")
+            for directory in self.proc.iterdir():
+                self.check_budget()
+                if not directory.name.isdecimal():
+                    continue
+                self.result["pids_examined"] += 1
+                if self.result["pids_examined"] > 2048:
+                    raise StorageProbeStopped("The storage evidence reached its process count limit.")
+                try:
+                    self.scan_process(directory)
+                except (FileNotFoundError, ProcessLookupError):
+                    # Exited processes and kernel threads without a userspace
+                    # mount namespace both have absent /proc metadata.
+                    self.result["pids_unavailable"] += 1
+                except (OSError, ValueError) as error:
+                    self.error("pid-" + directory.name, error)
+            self.checkpoint("process-namespaces-and-references")
+            self.command("kernel_journal", ["journalctl", "-k", "-b", "--no-pager", "-n", "200",
+                                           "-o", "short-monotonic"], cap=3, limit=48 * 1024)
+            self.check_budget()
+            self.result["collection_complete"] = not self.result["errors"]
+        except (OSError, ValueError, RuntimeError, StorageProbeStopped) as error:
+            self.error("collection", error)
+        finally:
+            self.checkpoint("finished")
+        return self.result
+
+
+def storage_save_evidence(value):
+    data = json.dumps(value, sort_keys=True, ensure_ascii=True)
+    require(len(data.encode()) <= STORAGE_EVIDENCE_LIMIT, "Storage evidence exceeded its total output limit.")
+    destination = RUNTIME / STORAGE_EVIDENCE_NAME
+    temporary = destination.with_suffix(".tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "w") as stream:
+        stream.write(data + "\n")
+    os.replace(temporary, destination)
+
+
+def storage_read_evidence():
+    path = RUNTIME / STORAGE_EVIDENCE_NAME
+    require(path.is_file() and not path.is_symlink() and path.stat().st_uid == os.geteuid()
+            and not path.stat().st_mode & 0o077, "Invalid private storage evidence file.")
+    with path.open("rb") as stream:
+        data = stream.read(STORAGE_EVIDENCE_LIMIT + 2)
+    require(len(data) <= STORAGE_EVIDENCE_LIMIT + 1, "Storage evidence exceeded its read limit.")
+    return json.loads(data)
+
+
+def capture_storage_cleanup_failure(status):
+    """Preserve the original failure even if read-only diagnosis times out."""
+    evidence = {"schema": 1, "reason": "installer-finalize-failed", "backend_exit_status": status,
+                "collection_complete": False, "last_stage": "starting", "errors": []}
+    try:
+        storage_save_evidence(evidence)
+        # Default GNU timeout process groups are intentional: --foreground
+        # would leave a stuck metadata/command child outside the hard bound.
+        completed = run(["timeout", "--signal=TERM", "--kill-after=2s", "18s",
+                         sys.executable, "-I", str(Path(__file__).resolve()), "storage-cleanup-probe"],
+                        check=False, capture=False, timeout=22)
+        evidence = storage_read_evidence()
+        evidence["backend_exit_status"] = status
+        evidence["collector_exit_status"] = completed.returncode
+        if completed.returncode:
+            evidence["collection_complete"] = False
+            evidence.setdefault("errors", []).append({"stage": "collector",
+                "error": f"The bounded evidence process exited {completed.returncode}."})
+    except Exception as error:
+        evidence["collection_complete"] = False
+        evidence.setdefault("errors", []).append({"stage": "collector", "error": str(error)[:500]})
+    try:
+        storage_save_evidence(evidence)
+    except Exception as error:
+        evidence["save_error"] = str(error)[:500]
+    print("VMTEST_STORAGE_CLEANUP_EVIDENCE=" + json.dumps(evidence, sort_keys=True), flush=True)
+
+
 def pam_check(user):
     """Exercise the packaged DDM password stack without fabricating a session."""
     password = "liveuser" if user == "liveuser" else PASSWORD
@@ -871,6 +1199,11 @@ def diagnostics():
             "-p", "Id,ActiveState,SubState,Result,MainPID,BusName,ExecMainStatus"]
         commands[f"user_bus_owners_{user}"] = user_prefix + ["busctl", "--user", "list", "--no-pager"]
     result = {"dde_shell_processes": [p for p in processes() if p["exe"] == "/usr/bin/dde-shell"]}
+    if (RUNTIME / STORAGE_EVIDENCE_NAME).exists():
+        try:
+            result["storage_cleanup"] = storage_read_evidence()
+        except (OSError, ValueError, RuntimeError) as error:
+            result["storage_cleanup"] = {"collection_complete": False, "error": str(error)[:500]}
     deadline = time.monotonic() + 160
     # Collect the specific crash trace before general journal output can spend
     # the bounded diagnostics budget. Never request or export core bytes.
@@ -937,11 +1270,20 @@ def main():
         result = pam_check(*args)
     elif action == "diagnostics":
         result = diagnostics()
+    elif action == "storage-cleanup-probe":
+        require(not args, "Storage cleanup evidence takes no command arguments.")
+        StorageCleanupProbe().collect()
+        return
     elif action == "stage":
         require(len(args) == 1 and args[0] in STAGES, "Invalid backend stage.")
         stage = args[0]
         print(f"VMTEST_BACKEND_START {stage}", flush=True)
         completed = run_backend(stage)
+        if stage == "finalize" and completed.returncode:
+            try:
+                capture_storage_cleanup_failure(completed.returncode)
+            except Exception as error:
+                print("VMTEST_STORAGE_PROBE_ERROR=" + str(error)[:500], flush=True)
         require(completed.returncode == 0, f"Actual installer backend {stage} failed ({completed.returncode}).")
         result = {"stage": stage, "status": "passed", "state": json.loads(STATE.read_text()).get("phase")}
     else:

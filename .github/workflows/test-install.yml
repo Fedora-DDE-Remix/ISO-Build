@@ -222,11 +222,12 @@ jobs:
             printf 'Expected controller UID=%s GID=%s KVM_GID=%s\n' "$runner_uid" "$runner_gid" "$kvm_gid"
           } 2>&1 | tee artifacts/vm/host-kvm-authorization.log
 
-      - name: Check the graphical login controller regressions
+      - name: Check VM controller and read-only diagnostic regressions
         run: |
           /usr/bin/python3 scripts/test-vm-login.py
           /usr/bin/python3 scripts/vm-session-probe-test.py
           /usr/bin/python3 scripts/vm-controller-regression.py
+          /usr/bin/python3 scripts/vm-storage-probe-test.py
 
       - name: Download the exact compose artifact
         uses: actions/download-artifact@v4

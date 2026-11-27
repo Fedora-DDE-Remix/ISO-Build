@@ -2,10 +2,12 @@
 
 ## 当前结论
 
-当前候选的[实际 compose](https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/45981240945/job/140445377978)已成功，但首个 canary 在安装前的 Live 图形登录观察阶段失败。
-修正采集器后的同镜像复验已确认 DDM 认证并建立 Wayland 会话，但没有可用的
-dde-shell 桌面，仍未开始安装。新证据确认宿主 KVM 用户 ACL 在探测期间被清除，
-导致真实 VM 回退到 TCG；下一轮将稳定宿主设备访问，再检验普遍服务超时是否消失。
+当前候选的[实际 compose](https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/45981240945/job/140445377978)已成功。
+修复宿主 KVM 授权后，同一 ISO 已通过真实 Live 图形登录、稳定桌面、资源和 Fedora PAM
+检查；16 GB 加密安装已完成分区、复制、系统配置及同次 Live 启动内的用户配置。
+当前阻断是 `finalize` 关闭 LUKS 映射时设备仍被占用。安装器记录的挂载均已正常卸载，
+但内核文件系统引用仍在；下一轮只补采实际占用证据，不放宽关闭映射或硬盘启动门禁。
+尚未完成加密硬盘启动，其余八个场景也尚未执行。
 本报告不是正式发行通过凭据。
 
 上一候选 `.2` 在原 schemas 严格编译处失败、未生成 ISO，见 [第二候选报告](VALIDATION-45.20261127.2.md)。
@@ -135,7 +137,7 @@ UEFI 使用未启用 Secure Boot 的 OVMF，BIOS 使用 SeaBIOS。各场景具�
 
 | 场景 | 固件 / 分区表 | 磁盘 | 根 / home / swap | 本候选结果 |
 | --- | --- | --- | --- | --- |
-| `uefi-luks-btrfs-small` | UEFI / GPT | 十进制 16 GB | LUKS2 内 Btrfs root/home | 首轮失败：Live 会话观测超时，尚未安装 |
+| `uefi-luks-btrfs-small` | UEFI / GPT | 十进制 16 GB | LUKS2 内 Btrfs root/home | 最新复验：Live 桌面及安装配置通过，finalize 关闭映射失败，尚未硬盘启动 |
 | `uefi-btrfs` | UEFI / GPT | 64 GiB | Btrfs root/home | 首轮未展开：canary 失败 |
 | `bios-ext4` | BIOS / GPT | 64 GiB | ext4 根、根内 home、2 MiB BIOS boot | 首轮未展开：canary 失败 |
 | `bios-mbr-ext4` | BIOS / MBR | 64 GiB | ext4 根、根内 home | 首轮未展开：canary 失败 |
@@ -253,10 +255,57 @@ root:GID 993、0660 模式不变，ACL 与 ctime 发生变化。因此“探测�
 可能在没有活动 seat 用户时清除命名用户 ACL。这是源码支持的解释，未替代本次
 宿主修改者的直接记录。
 
-下一轮宿主修复采用现有设备的 `kvm` 组访问：仅在字符设备与已核验组 GID 相符时
+后续宿主修复采用现有设备的 `kvm` 组访问：仅在字符设备与已核验组 GID 相符时
 为临时 runner 增加组成员资格，由同一非 root UID 启动具备新附加组的控制器。
 启动门禁核对 UID/GID、附加组和实际 open；现有 probe 前后快照继续验证访问是否稳定。
-不改变桌面启动时限、ISO 字节或安装验收条件。组授权与实际 KVM 运行效果仍待下一轮证明。
+不改变桌面启动时限、ISO 字节或安装验收条件。其真实效果见下一节。
+
+### 第三次专用复验：Live 桌面通过，LUKS 收尾失败
+
+[Run 45992850996](https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/45992850996)
+使用测试提交 `78fc2c28080d9c1af21ed4545d1c28f682d689c1`，原始 ISO 内容不变。
+41 项宿主回归、真实 sudo shell 和原始 ISO 来源/摘要校验全部通过。
+控制器保持 UID/EUID/GID/EGID 1001，新的附加组包含设备所属的 `kvm` GID 993。
+probe 前、probe 后和实际启动前三次真实打开 `/dev/kvm` 均成功；QEMU 使用
+`q35,accel=kvm`、`-cpu host`，QMP 实际返回 KVM enabled/present/running。
+
+本轮 Live 桌面、有效资源及原生 PAM 检查通过，`desktop_failures=[]`。
+人工查看原始稳定帧 `017-desktop-frame.png`，可见地球壁纸、桌面图标和底部面板。
+这是同一 ISO 的实际运行证据；没有改写历史 DPF 构建 artifact 中当时尚未验证桌面的记录。
+
+真正的安装后端已完成 `preflight → partition → copy → system → ready → configure`。
+加密检查确认 LUKS2、单个 Argon2id 密钥槽、内层 Btrfs UUID、`crypttab` 密钥字段 `none`，
+实际错误口令拒绝与正确口令接受；检查的目标配置、BLS 和安装器状态文件没有测试口令。
+这证明当前 payload 在这块十进制 16 GB 盘中完成了复制和配置，尚不能宣称完整安装成功。
+
+`finalize` 失败返回：
+
+```text
+cryptsetup failed (exit 5)
+device-mapper: remove ioctl ... failed: Device or resource busy
+Device luks-9edfb36e-f08b-4943-a127-35694ff95bcb is still in use.
+```
+
+失败后的状态为 `phase=finalizing`、`owned_mounts=[]`；完整 `findmnt` 没有 `/target`
+或该目标 Btrfs，`lsblk` 中映射仍在且没有挂载点。进程快照仍有该文件系统的 Btrfs
+工作线程。现有记录没有各进程 mount namespace、块设备打开计数或持有者，不能
+把特定桌面进程、os-prober、udev 或某个 SPEC 指认为原因。
+结果继续为 `failed`、`installation_checks_completed=false`，未执行移除 ISO 后的硬盘启动。
+
+完整证据 [artifact 15194364053](https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/45992850996/artifacts/15194364053)
+为 `5,132,094` 字节，共 71 个文件，实际下载后独立核验 SHA-256：
+`0f2d2b334d99d10eff36a25a98311ed18773705128892a2dc381f271e91eba5d`。
+
+下一轮仍复用此 ISO，只在原 `finalize` 失败后收集有界只读占用诊断：device-mapper
+打开计数/holders、相关进程的 mount namespace、cwd/root/FD 元数据和内核日志。
+不终止进程、不额外卸载、不使用 deferred/force 关闭，不把诊断成功当作安装成功。
+诊断子进程共用 15 秒软预算，18 秒 TERM、再 2 秒 KILL，父进程最多等待 22 秒；
+证据采用私有文件逐步保存，采集超时或短命 PID 不覆盖原安装错误。
+新增 15 项诊断回归覆盖 Btrfs 虚拟设备号、mountinfo 转义、进程消失、预算/输出限制、
+块设备 FD、权限错误、秘密字段排除及失败状态保留；与既有 41 项合计 56 项本地通过，
+真实复验仍待执行。
+
+### 完整安装的验收流程
 
 每组先真实启动 ISO，经 DDM 登录并验收桌面，执行实际安装后端的
 `preflight → partition → copy → system → ready → configure → finalize`。
