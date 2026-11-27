@@ -39,7 +39,7 @@ jobs:
           cp "$RUNNER_TEMP/dpf-tooling.log" artifacts/dpf/tooling.log
           dnf -y copr enable mozixun/Fedora-DDE-Remix fedora-45-x86_64 \
             2>&1 | tee artifacts/dpf/copr-enable.log
-          cp /etc/yum.repos.d/*copr*.repo artifacts/dpf/repositories/
+          cat /etc/yum.repos.d/*copr*.repo > artifacts/dpf/repositories/copr.repo
           dnf -y --refresh install qt6-qtbase-devel dde-file-manager-devel \
             dde-file-manager-desktop dde-shell \
             2>&1 | tee artifacts/dpf/sdk-install.log
@@ -48,13 +48,20 @@ jobs:
         shell: bash
         run: bash scripts/diagnose-dpf/run.sh artifacts/dpf
 
+      - name: Preserve tooling log
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p artifacts/dpf
+          if test -f "$RUNNER_TEMP/dpf-tooling.log"; then
+            cp "$RUNNER_TEMP/dpf-tooling.log" artifacts/dpf/tooling.log
+          fi
+
       - name: Upload complete diagnostic evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: DPF-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            artifacts/dpf/
-            ${{ runner.temp }}/dpf-tooling.log
+          path: artifacts/dpf/
           if-no-files-found: error
           retention-days: 30

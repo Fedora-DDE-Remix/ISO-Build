@@ -2,6 +2,7 @@
 #include <QDebug>
 #include <QObject>
 #include <QPluginLoader>
+#include <cstdio>
 
 class OuterPlugin : public QObject
 {
@@ -15,17 +16,26 @@ public:
         auto *event = dpf::Event::instance();
         event->registerEventType(dpf::EventStratege::kSlot,
                                  "dpf_probe_outer", "slot_Number");
-        qInfo() << "outer registry=" << event->eventType("dpf_probe_outer", "slot_Number")
-                << "converted=" << dpf::EventConverter::convert("dpf_probe_outer", "slot_Number")
-                << "callback=" << bool(dpf::EventConverter::convertFunc)
-                << "callback_address=" << reinterpret_cast<quintptr>(&dpf::EventConverter::convertFunc);
+        std::fprintf(stdout, "outer registry=%d converted=%d callback=%d callback_address=%p\n",
+                     event->eventType("dpf_probe_outer", "slot_Number"),
+                     dpf::EventConverter::convert("dpf_probe_outer", "slot_Number"),
+                     int(bool(dpf::EventConverter::convertFunc)),
+                     static_cast<const void *>(&dpf::EventConverter::convertFunc));
+        std::fflush(stdout);
         QPluginLoader loader(innerPath);
-        qInfo() << "inner load hints=" << loader.loadHints();
+        std::fprintf(stdout, "inner load hints=%d\n", int(loader.loadHints()));
+        std::fflush(stdout);
         QObject *inner = loader.instance();
-        if (!inner) { qCritical() << loader.errorString(); return 5; }
+        if (!inner) {
+            std::fprintf(stderr, "inner load failed: %s\n", loader.errorString().toUtf8().constData());
+            return 5;
+        }
         int result = 6;
         if (!QMetaObject::invokeMethod(inner, "run", Qt::DirectConnection,
-                                      Q_RETURN_ARG(int, result))) return 6;
+                                      Q_RETURN_ARG(int, result))) {
+            std::fputs("inner run invocation failed\n", stderr);
+            return 6;
+        }
         return result;
     }
 };

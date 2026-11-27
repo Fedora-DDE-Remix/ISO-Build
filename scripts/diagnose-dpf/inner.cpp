@@ -3,6 +3,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QObject>
+#include <cstdio>
 
 class ProbeHandler : public QObject
 {
@@ -47,7 +48,9 @@ public:
             { "list_size", list.value<QList<int>>().size() },
             { "passed", result }
         };
-        qInfo().noquote() << QJsonDocument(report).toJson(QJsonDocument::Compact);
+        const QByteArray json = QJsonDocument(report).toJson(QJsonDocument::Compact);
+        std::fprintf(stdout, "%s\n", json.constData());
+        std::fflush(stdout);
         return result ? 0 : 1;
     }
 private:
