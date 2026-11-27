@@ -24,6 +24,7 @@ bash /workspace/scripts/prepare-comps.sh
 install -m644 /work/comps-input.json /output/comps-input.json
 cp -a /work/comps-bootstrap/*.rpm /output/rpms/
 install -m644 /work/comps-bootstrap/pubkey.gpg /output/rpms/comps-pubkey.gpg
+cmp /work/comps-bootstrap/pubkey.gpg /workspace/config/RPM-GPG-KEY-fedora-dde-remix
 dnf group info dde-desktop | tee /output/dde-desktop-group.txt
 rpm -q dde-desktop-comps | tee /output/comps-version.txt
 
@@ -34,6 +35,7 @@ actual_ref=$(git -c safe.directory=/installer -C /installer rev-parse HEAD)
 [[ $actual_ref == "$INSTALLER_REF" ]]
 iso_ref=$(git -c safe.directory=/workspace -C /workspace rev-parse HEAD)
 export INSTALLER_REF FEDORA_RELEASE TARGET_ARCH CONFIG_VERSION iso_ref
+python3 /workspace/scripts/prepare-dfm-hotfix.py
 
 # The workflow checks the pinned archive digest and Actions run before making
 # this directory available read-only. No credentials enter this container.
@@ -44,10 +46,10 @@ from pathlib import Path
 marker = Path('/installer-rpms/verified-input.json')
 approved = {
     'schema': 1,
-    'commit': 'e10bf53ad51e0dea7cc5133052a0d8e0dc6bcce9',
-    'run_id': 45837838480,
-    'artifact_id': 15127527642,
-    'sha256': 'de0d2ce8467bdb0ace5c6a4719198b437e631e7b86127bc89b02959a29958751',
+    'commit': 'f9fb0061d596e53621b7c8daac8fc0cd77257594',
+    'run_id': 45950570144,
+    'artifact_id': 15176607519,
+    'sha256': 'bc86b56129d3c847ac9bfd633155412662f6226ae5be84034c0d06b7d15bd416',
 }
 
 def unique_keys(pairs):
@@ -167,8 +169,8 @@ try:
                    '/installer/packaging/fedora-dde-installer.spec').split('\t')
     if len(expected) != 4 or expected[0] != 'fedora-dde-installer':
         raise ValueError('cannot determine the pinned installer spec identity')
-    if reuse and expected[2] != '0.2.2':
-        raise ValueError('the approved installer artifact must match version 0.2.2')
+    if reuse and expected[2] != '0.3.0':
+        raise ValueError('the approved installer artifact must match version 0.3.0')
     binary_info = inspect(binary, expected, False)
     source_info = inspect(source, expected, True)
     if binary_info['source_rpm'] != source.name:
@@ -200,6 +202,7 @@ data = {
     'desktop_group': 'dde-desktop',
     'comps': json.loads(Path('/work/comps-input.json').read_text()),
     'installer_input': json.loads(Path('/work/installer-input.json').read_text()),
+    'dfm_hotfix': json.loads(Path('/work/dfm-hotfix-input.json').read_text()),
     'live_login': 'manual',
     'built_at_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
 }
@@ -211,8 +214,9 @@ config_top=/work/config-rpmbuild
 config_source=/work/config-sources/fedora-dde-remix-config-$CONFIG_VERSION
 mkdir -p "$config_top"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS} "$config_source"/{config,scripts}
 install -m644 /workspace/LICENSE /workspace/README.md "$config_source/"
-install -m644 /workspace/config/{install-profile.json,fedora-dde-live.service,ddm-kmscon.conf} "$config_source/config/"
+install -m644 /workspace/config/{install-profile.json,fedora-dde-live.service,ddm-kmscon.conf,fedora-dde-remix.repo,RPM-GPG-KEY-fedora-dde-remix} "$config_source/config/"
 install -m755 /workspace/scripts/configure-live.sh "$config_source/scripts/"
+install -m755 /workspace/scripts/check-copr.py "$config_source/scripts/"
 tar -C /work/config-sources -czf "$config_top/SOURCES/fedora-dde-remix-config-$CONFIG_VERSION.tar.gz" \
     "fedora-dde-remix-config-$CONFIG_VERSION"
 rpmbuild --define "_topdir $config_top" -ba /workspace/packaging/fedora-dde-remix-config.spec \

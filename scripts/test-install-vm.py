@@ -40,9 +40,11 @@ import uuid
 
 TEST_USER = "vmtest"
 TEST_PASSWORD = "FedoraVmtest2026"
+CRYPT_PASSWORD = "FedoraLuksVmtest2026"
 LIVE_USER = "liveuser"
 LIVE_PASSWORD = "liveuser"
-SCENARIOS = ("uefi-btrfs", "bios-ext4", "bios-mbr-ext4", "uefi-xfs-home-swap", "uefi-preserve", "uefi-small")
+SCENARIOS = ("uefi-btrfs", "bios-ext4", "bios-mbr-ext4", "uefi-xfs-home-swap", "uefi-preserve", "uefi-small",
+             "uefi-luks-btrfs-small", "bios-luks-ext4", "uefi-luks-xfs")
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)")
 
 
@@ -68,7 +70,7 @@ def sha256(path):
 
 
 def redact(value):
-    return value.replace(TEST_PASSWORD, "[disposable test password]")
+    return value.replace(TEST_PASSWORD, "[disposable test password]").replace(CRYPT_PASSWORD, "[disposable LUKS passphrase]")
 
 
 def log(message):
@@ -694,6 +696,24 @@ class VM:
         log("GRUB accepted the original ISO search/kernel/initrd commands; booting and waiting for serial login.")
         self.serial.send("boot\n")
 
+    def unlock_root(self, installation, timeout):
+        record = installation.get("encrypted_root")
+        require(record and record.get("name") == "luks-" + record.get("uuid", ""),
+                "Encrypted disk boot is missing its finalized LUKS identity.")
+        # The test's inherited serial console is last on the kernel command
+        # line. Wait for the real initramfs password request before sending any
+        # input; never embed a key in the initramfs or bypass the boot unlock.
+        before, prompt = self.serial.expect(
+            r"(?i:Please enter (?:the )?(?:passphrase|password) for (?:disk|volume))[^\n]{0,600}:\s*",
+            self.report.remaining(timeout))
+        require(not re.search(r"(?:^|\n)[^\n]{0,100}login:\s*", before),
+                "The encrypted installation booted to login before requesting its passphrase.")
+        (self.output / "luks-boot-prompt.log").write_text(redact(prompt) + "\n")
+        self.screenshot("encrypted-disk-passphrase-prompt")
+        self.serial.send(CRYPT_PASSWORD + "\n")
+        return {"luks_uuid": record["uuid"], "initramfs_password_prompt_observed": True,
+                "passphrase_supplied_via": "interactive serial console", "boot_confirmed_by_following_login": True}
+
     def login_session(self, user, checkpoint, deadline, name):
         remaining = deadline - time.monotonic()
         require(remaining > 0, "The graphical login deadline expired.")
@@ -939,7 +959,7 @@ def main():
             require(4096 <= memory < total_mib - 1024 and 1 <= cpus <= (os.cpu_count() or 1), "Guest resource settings exceed runner capacity.")
             uefi = not args.scenario.startswith("bios-")
             firmware, variables = firmware_paths(args) if uefi else (None, None)
-            disk_size = 16_000_000_000 if args.scenario == "uefi-small" else 64 * 1024**3
+            disk_size = 16_000_000_000 if args.scenario in {"uefi-small", "uefi-luks-btrfs-small"} else 64 * 1024**3
             accel, probe = accelerator(output, work)
             log(f"Using {accel.upper()}, {cpus} vCPUs, {memory} MiB RAM; KVM probe {'passed' if accel == 'kvm' else 'failed, real TCG fallback will run'}.")
             report.data.update(iso={"filename": args.iso.name, "sha256": sha256(args.iso), "size": args.iso.stat().st_size},
@@ -986,6 +1006,8 @@ def main():
                     report.data["evidence"]["account_configuration"] = vm.guest.check("account", timeout=120)
                 result = vm.guest.check("stage", stage, timeout=3600, name="backend-" + stage)
                 report.data["evidence"].setdefault("backend_stages", []).append(result)
+                if stage == "configure" and "-luks-" in args.scenario:
+                    report.data["evidence"]["encrypted_target"] = vm.guest.check("encryption-check", "target", timeout=180)
 
         with report.stage("finalize-and-power-off-live"):
             installed = vm.guest.check("installed-state", timeout=120)
@@ -1001,7 +1023,10 @@ def main():
             vm = VM(args, report, work, output / "installed", firmware,
                     report.data["acceleration"]["selected"], cpus, memory, "installed")
             require(not any("id=live" in arg or str(args.iso) in arg for arg in vm.command), "The installed VM still has the ISO attached.")
+            unlock = vm.unlock_root(installed, args.boot_timeout) if "-luks-" in args.scenario else None
             vm.guest.login(TEST_USER, TEST_PASSWORD, report.remaining(args.boot_timeout))
+            if unlock:
+                report.data["evidence"]["encrypted_disk_boot"] = unlock
             vm.guest.upload_helper(helper, args.scenario,
                                    {"installation": installed, "partition_plan": report.data["evidence"]["partition_plan"]})
             vm.screenshot("installed-disk-login")

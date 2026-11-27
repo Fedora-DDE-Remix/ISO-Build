@@ -12,7 +12,7 @@ on:
         required: true
         type: string
       scenario:
-        description: One partition scenario, or all release scenarios
+        description: One scenario, all scenarios, or remaining scenarios after the encrypted small-disk canary
         required: false
         default: all
         type: string
@@ -44,6 +44,9 @@ on:
           - bios-mbr-ext4
           - uefi-xfs-home-swap
           - uefi-preserve
+          - uefi-luks-btrfs-small
+          - bios-luks-ext4
+          - uefi-luks-xfs
       continue-after-desktop-failure:
         description: Collect disk diagnostics after a desktop failure (still fails overall)
         required: false
@@ -70,11 +73,14 @@ jobs:
           python3 - <<'PY'
           import json, os
           scenarios = ['uefi-btrfs', 'bios-ext4', 'bios-mbr-ext4',
-                       'uefi-xfs-home-swap', 'uefi-preserve', 'uefi-small']
+                       'uefi-xfs-home-swap', 'uefi-preserve', 'uefi-small',
+                       'uefi-luks-btrfs-small', 'bios-luks-ext4', 'uefi-luks-xfs']
           requested = os.environ['REQUESTED_SCENARIO']
-          if requested not in ['all', *scenarios]:
+          if requested not in ['all', 'remaining', *scenarios]:
               raise SystemExit('Unknown partition scenario: ' + requested)
-          selected = scenarios if requested == 'all' else [requested]
+          selected = (scenarios if requested == 'all' else
+                      [name for name in scenarios if name != 'uefi-luks-btrfs-small']
+                      if requested == 'remaining' else [requested])
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write('scenarios=' + json.dumps(selected) + '\n')
           PY

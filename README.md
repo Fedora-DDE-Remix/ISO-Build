@@ -42,7 +42,31 @@ DNF 5 的 `group install` 对应桌面组安装操作。comps RPM 先安装本�
 产物的 `comps-input.json` 和 `build-info.json` 记录实际选择的来源、版本及校验值。
 安装后直接读取该 RPM 的 comps 元数据，逐一检查 `dde-desktop` 的 mandatory 包已安装；
 DNF 即使跳过缺失的组包并返回成功，也不能绕过这项检查。
-本工作流不写入 COPR，也不构建或修改 `Deepin-Desktop-Environment` 仓库。
+本工作流不写入 COPR，`Deepin-Desktop-Environment` 维护仓库保持只读。
+本次独立 DFM 临时包重建的原因、固定输入和验收边界见
+[桌面插件故障与临时补丁报告](DDE-HOTFIX-20261127.md)。
+
+### 安装后默认保留 COPR
+
+45.20261127.1 配方将 Fedora DDE Remix 的源文件与已核验公钥纳入
+`fedora-dde-remix-config` RPM。标准 COPR 仓库 ID 保持为
+`copr:copr.fedorainfracloud.org:mozixun:Fedora-DDE-Remix`，默认启用，并保留
+`gpgcheck=1` 和 `sslverify=1`。地址使用 `$releasever`、`$basearch`；安装目标
+移除 Live 安装器时不会移除配置 RPM。构建检查实际 payload 的配置和 RPM 归属，
+Live 与硬盘启动测试再用 DNF 检查源确实处于启用状态。
+
+### LUKS2 加密安装
+
+新版配方包含 `cryptsetup` 和 `systemd-cryptsetup`，配合安装器 0.3.0 的加密入口。
+ESP 与独立 `/boot` 保持明文；根和个人数据位于同一个 LUKS2 容器中，Btrfs 使用
+root/home 子卷，ext4/XFS 的 home 是根内目录。开机交互输入口令解锁。
+加密模式暂不接受独立明文 home、var、其他数据挂载和磁盘 swap，保留默认 zram。
+不支持复用已有 LUKS、分离头、多容器或 LVM。
+
+口令使用匿名 sealed memfd 传递，crypttab 使用 `none` 密钥文件字段，目标系统
+不存放自动解锁密钥。小盘检查额外扣除 32 MiB 加密头，再应用原有 12 GiB 内层根
+下限和 payload 实际占用。下面新增的加密场景必须有新镜像实测报告，不能沿用旧版
+未加密安装报告。每次构建先运行 16 GB 加密 Btrfs 场景，成功后才运行其余八组。
 
 ## Live 登录与 PAM
 
@@ -98,10 +122,15 @@ SHA-256，使用 OVMF UEFI 或 SeaBIOS、独立 sparse qcow2、QEMU 的本地 UN
 | `uefi-xfs-home-swap` | UEFI | XFS 根分区、独立 `/home`、磁盘 swap、`/boot`、ESP | 64 GiB |
 | `uefi-preserve` | UEFI | 保留已有分区及验证文件，在剩余空间安装 | 64 GiB |
 | `uefi-small` | UEFI | 默认 Btrfs 布局的小容量完整安装 | 16 GB（十进制） |
+| `uefi-luks-btrfs-small` | UEFI | LUKS2 内 Btrfs root/home，明文 `/boot` 和 ESP | 16 GB（十进制） |
+| `bios-luks-ext4` | BIOS | GPT、LUKS2 内 ext4 根与 home，明文 `/boot` | 64 GiB |
+| `uefi-luks-xfs` | UEFI | LUKS2 内 XFS 根与 home，明文 `/boot` 和 ESP | 64 GiB |
 
 测试保存阶段日志、截图、ISO 校验值和 JSON 报告；失败仍上传诊断。
 测试账户只在这次虚拟机安装中创建，不写入正式 ISO。自动检查的范围以实际
-完成的报告为准；实体硬件、Secure Boot、多磁盘与加密安装不在这组测试范围内。
+完成的报告为准；实体硬件、Secure Boot、多磁盘与已有加密分区复用不在这组范围内。
+加密场景还检查错误口令不能解锁、正确口令可用、crypttab 不含密钥文件、目标配置
+和安装日志不含测试口令、完成后关闭 mapper，以及移除 ISO 后真实提示输入口令并启动。
 
 如需对同一镜像重试，在 **Test ISO installation → Run workflow** 填入构建
 run ID 和完整 ISO artifact 名称；`scenario` 默认 `all`，也可选一组分区。

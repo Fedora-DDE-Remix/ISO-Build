@@ -2,11 +2,18 @@ name: Build Fedora DDE Live ISO
 
 on:
   push:
-    branches: [main]
+    branches: [main, iso-candidate-20261127.1]
     paths-ignore:
       - '*.md'
       - LICENSE
       - '.github/workflows/test-install.yml'
+      - '.github/workflows/diagnose-dpf.yml'
+      - '.github/workflows/build-dfm-hotfix.yml'
+      - '.github/workflows/validate-dfm-hotfix.yml'
+      - 'scripts/diagnose-dpf/**'
+      - 'scripts/build-dfm-hotfix.sh'
+      - 'scripts/validate-dfm-hotfix.*'
+      - 'packaging/hotfix/**'
       - 'scripts/test-install-vm.py'
       - 'scripts/vm-*'
   workflow_dispatch:
@@ -72,11 +79,11 @@ jobs:
           set -euo pipefail
           mkdir -p .build/installer-rpms
           source config/build.env
-          if [[ $INSTALLER_REF != e10bf53ad51e0dea7cc5133052a0d8e0dc6bcce9 ]]; then
+          if [[ $INSTALLER_REF != f9fb0061d596e53621b7c8daac8fc0cd77257594 ]]; then
             echo 'No verified artifact is pinned for this installer revision; building from source.'
             exit 0
           fi
-          if ! artifact_source_ref=$(gh api repos/Fedora-DDE-Remix/fedora-dde-installer/actions/runs/45837838480 --jq .head_sha); then
+          if ! artifact_source_ref=$(gh api repos/Fedora-DDE-Remix/fedora-dde-installer/actions/runs/45950570144 --jq .head_sha); then
             echo 'Installer CI metadata is unavailable; building from source.'
             exit 0
           fi
@@ -84,19 +91,70 @@ jobs:
             echo 'Installer CI revision differs; building from source.'
             exit 0
           fi
-          if ! gh api repos/Fedora-DDE-Remix/fedora-dde-installer/actions/artifacts/15127527642/zip > .build/installer-input.zip; then
+          if ! gh api repos/Fedora-DDE-Remix/fedora-dde-installer/actions/artifacts/15176607519/zip > .build/installer-input.zip; then
             echo 'Installer artifact is unavailable or expired; building from source.'
             exit 0
           fi
-          echo 'de0d2ce8467bdb0ace5c6a4719198b437e631e7b86127bc89b02959a29958751  .build/installer-input.zip' | sha256sum --check --strict
+          echo 'bc86b56129d3c847ac9bfd633155412662f6226ae5be84034c0d06b7d15bd416  .build/installer-input.zip' | sha256sum --check --strict
           unzip -q .build/installer-input.zip -d .build/installer-rpms
           python3 - <<'PY'
           import json
           from pathlib import Path
-          data = {'schema': 1, 'commit': 'e10bf53ad51e0dea7cc5133052a0d8e0dc6bcce9',
-                  'run_id': 45837838480, 'artifact_id': 15127527642,
-                  'sha256': 'de0d2ce8467bdb0ace5c6a4719198b437e631e7b86127bc89b02959a29958751'}
+          data = {'schema': 1, 'commit': 'f9fb0061d596e53621b7c8daac8fc0cd77257594',
+                  'run_id': 45950570144, 'artifact_id': 15176607519,
+                  'sha256': 'bc86b56129d3c847ac9bfd633155412662f6226ae5be84034c0d06b7d15bd416'}
           Path('.build/installer-rpms/verified-input.json').write_text(json.dumps(data, indent=2) + '\n')
+          PY
+
+      - name: Download the pinned complete DFM hotfix
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, re, subprocess
+          from pathlib import Path
+          expected = json.loads(Path('config/dfm-hotfix-input.json').read_text())
+          repository = 'Fedora-DDE-Remix/ISO-Build'
+          assert type(expected['schema']) is int and expected['schema'] in (1, 2) and expected['repository'] == repository
+          assert re.fullmatch(r'[0-9a-f]{40}', expected['build_commit'])
+          assert re.fullmatch(r'[0-9a-f]{64}', expected['sha256'])
+          assert type(expected['run_id']) is int and expected['run_id'] > 0
+          assert type(expected['artifact_id']) is int and expected['artifact_id'] > 0
+          def api(path):
+              return json.loads(subprocess.check_output(['gh', 'api', 'repos/' + repository + path], text=True))
+          verification_run = expected['run_id']
+          verification_commit = expected['build_commit']
+          if expected['schema'] == 2:
+              verification_run = expected['validation_run_id']
+              verification_commit = expected['validation_commit']
+              assert type(verification_run) is int and verification_run > 0
+              assert re.fullmatch(r'[0-9a-f]{40}', verification_commit)
+              original = expected['source_artifact']
+              assert set(original) == {'id', 'sha256', 'size_in_bytes'}
+              assert type(original['id']) is int and original['id'] > 0
+              assert type(original['size_in_bytes']) is int and original['size_in_bytes'] > 0
+              assert re.fullmatch(r'[0-9a-f]{64}', original['sha256'])
+              original_run = api('/actions/runs/' + str(expected['run_id']))
+              assert original_run['head_sha'] == expected['build_commit'] and original_run['conclusion'] == 'failure'
+              original_artifact = api('/actions/artifacts/' + str(original['id']))
+              assert original_artifact['workflow_run']['id'] == expected['run_id']
+              assert original_artifact['workflow_run']['head_sha'] == expected['build_commit']
+              assert original_artifact['size_in_bytes'] == original['size_in_bytes']
+              assert original_artifact['digest'] == 'sha256:' + original['sha256']
+          run = api('/actions/runs/' + str(verification_run))
+          assert run['head_sha'] == verification_commit and run['conclusion'] == 'success'
+          artifact = api('/actions/artifacts/' + str(expected['artifact_id']))
+          assert artifact['workflow_run']['id'] == verification_run and not artifact['expired']
+          assert artifact['workflow_run']['head_sha'] == verification_commit
+          assert artifact['digest'] == 'sha256:' + expected['sha256']
+          with Path('.build/dfm-hotfix-input.zip').open('wb') as output:
+              subprocess.run(['gh', 'api', 'repos/' + repository + '/actions/artifacts/' + str(expected['artifact_id']) + '/zip'], stdout=output, check=True)
+          import hashlib
+          with Path('.build/dfm-hotfix-input.zip').open('rb') as source:
+              assert hashlib.file_digest(source, 'sha256').hexdigest() == expected['sha256']
+          print('Verified complete DFM RPM provenance, successful validation and exact artifact archive.')
           PY
 
       - name: Build RPMs and compose the Live ISO
@@ -108,6 +166,7 @@ jobs:
             --volume "$GITHUB_WORKSPACE:/workspace:ro" \
             --volume "$GITHUB_WORKSPACE/.build/installer:/installer:ro" \
             --volume "$GITHUB_WORKSPACE/.build/installer-rpms:/installer-rpms:ro" \
+            --volume "$GITHUB_WORKSPACE/.build/dfm-hotfix-input.zip:/dfm-hotfix-input.zip:ro" \
             --volume "$RUNNER_TEMP/fedora-dde-iso-work:/work" \
             --volume "$GITHUB_WORKSPACE/artifacts:/output" \
             registry.fedoraproject.org/fedora:45 \
@@ -176,11 +235,21 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-  installation:
-    name: Install and boot the composed ISO
+  canary:
+    name: Check desktop and encrypted small-disk installation
     needs: compose
     uses: ./.github/workflows/test-install.yml
     with:
       iso-run-id: ${{ github.run_id }}
       iso-artifact-name: ${{ needs.compose.outputs.iso-artifact }}
+      scenario: uefi-luks-btrfs-small
+
+  installation:
+    name: Test the remaining partition combinations
+    needs: [compose, canary]
+    uses: ./.github/workflows/test-install.yml
+    with:
+      iso-run-id: ${{ github.run_id }}
+      iso-artifact-name: ${{ needs.compose.outputs.iso-artifact }}
+      scenario: remaining
 

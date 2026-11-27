@@ -8,6 +8,7 @@ entry point requires the VM's DMI marker and an authorization file in /run.
 from __future__ import annotations
 
 import ctypes as C
+import fcntl
 import grp
 import hashlib
 import json
@@ -29,10 +30,12 @@ STATE = CONFIG.with_name("state.json")
 CONFIG_TOOL = "/usr/bin/fedora-dde-installer-config"
 USERNAME = "vmtest"
 PASSWORD = "FedoraVmtest2026"
+CRYPT_PASSWORD = "FedoraLuksVmtest2026"
 HOSTNAME = "fedora-dde-vmtest"
 POLICIES = {"ddm", "dde_daemon", "dde_api", "deepin_system_monitor"}
 STAGES = ("preflight", "partition", "copy", "system", "ready", "configure", "finalize")
-SCENARIOS = {"uefi-btrfs", "bios-ext4", "bios-mbr-ext4", "uefi-xfs-home-swap", "uefi-preserve", "uefi-small"}
+SCENARIOS = {"uefi-btrfs", "bios-ext4", "bios-mbr-ext4", "uefi-xfs-home-swap", "uefi-preserve", "uefi-small",
+             "uefi-luks-btrfs-small", "bios-luks-ext4", "uefi-luks-xfs"}
 
 
 def require(condition, message):
@@ -40,11 +43,12 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
-def run(argv, *, check=True, timeout=120, capture=True):
-    result = subprocess.run(argv, text=True, encoding="utf-8", errors="replace",
+def run(argv, *, check=True, timeout=120, capture=True, input_text=None, pass_fds=(), extra_env=None):
+    result = subprocess.run(argv, input=input_text, text=True, encoding="utf-8", errors="replace",
                             stdout=subprocess.PIPE if capture else None,
                             stderr=subprocess.PIPE if capture else None,
-                            timeout=timeout, env=dict(os.environ, LC_ALL="C", LANG="C"))
+                            timeout=timeout, pass_fds=pass_fds,
+                            env=dict(os.environ, LC_ALL="C", LANG="C", **(extra_env or {})))
     if check and result.returncode:
         raise RuntimeError(f"{argv[0]} exited {result.returncode}: {(result.stderr or '')[-3000:]}")
     return result
@@ -165,14 +169,28 @@ def baseline(phase, expected_uuid=""):
         time.sleep(2)
     run(["systemctl", "is-active", "ddm.service"])
     security = policy_check()
+    copr = json.loads(run(["/usr/libexec/fedora-dde-check-copr"]).stdout)
+    enabled_repositories = json.loads(run(["dnf", "--cacheonly", "repo", "list", "--enabled", "--json"], timeout=60).stdout)
+    require(isinstance(enabled_repositories, list)
+            and sum(repo.get("id") == copr["repository"] and repo.get("is_enabled") is True
+                    for repo in enabled_repositories) == 1,
+            "DNF does not list the installed Remix COPR repository as enabled.")
+    copr["dnf_enabled_verified"] = True
     cmdline = Path("/proc/cmdline").read_text().strip()
     root = mount_info("/")
     result = {"phase": phase, "scenario": scenario, "uefi": uefi,
               "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
-              "cmdline": cmdline, "root": root, "profile": profile, "selinux": security,
+              "cmdline": cmdline, "root": root, "profile": profile, "selinux": security, "copr": copr,
               "build_info": json.loads(Path("/usr/share/fedora-dde-remix/build-info.json").read_text()),
               "packages": run(["rpm", "-q", "ddm", "treeland", "dde-session", "dde-shell",
                                 "selinux-policy-targeted"], check=False).stdout.splitlines()}
+    hotfix_packages = []
+    for package in result["build_info"]["dfm_hotfix"]["runtime_rpms"]:
+        actual = run(["rpm", "-q", "--qf", "%{EPOCHNUM}\t%{VERSION}\t%{RELEASE}\t%{ARCH}\t%{SOURCERPM}", package["name"]]).stdout.split("\t")
+        require(actual == [str(package["epoch"]), package["version"], package["release"], package["arch"], package["source_rpm"]],
+                "The tested DFM package differs from the verified temporary hotfix: " + package["name"])
+        hotfix_packages.append(package["name"] + "-" + package["version"] + "-" + package["release"])
+    result["verified_dfm_hotfix_packages"] = hotfix_packages
     user = "liveuser" if phase == "live" else USERNAME
     account = pwd.getpwnam(user)
     groups = [grp.getgrgid(g).gr_name for g in os.getgrouplist(user, account.pw_gid)]
@@ -186,10 +204,19 @@ def baseline(phase, expected_uuid=""):
         require("rd.live.image" not in cmdline.split() and "root=live:" not in cmdline,
                 "The second boot is still running a Live system.")
         require(expected_uuid and root.get("uuid") == expected_uuid, "The disk boot has the wrong root UUID.")
-        wanted_fs = "ext4" if scenario.startswith("bios-") else "xfs" if scenario == "uefi-xfs-home-swap" else "btrfs"
+        wanted_fs = "ext4" if scenario.startswith("bios-") else "xfs" if scenario in {"uefi-xfs-home-swap", "uefi-luks-xfs"} else "btrfs"
         require(root["fstype"] == wanted_fs and "rw" in root["options"].split(","), "Installed root filesystem is wrong or not writable.")
         result["boot_filesystems"] = installed_boot_mounts(test.get("installation", {}), uefi)
+        if "-luks-" in scenario:
+            result["encryption"] = encryption_check("installed")
         home = mount_info("/home")
+        if "-luks-" in scenario:
+            encrypted = test["installation"]["encrypted_root"]
+            require(home.get("uuid") == expected_uuid
+                    and Path(home["source"].split("[", 1)[0]).resolve() == Path(encrypted["mapper"]).resolve(),
+                    "The installed home directory is outside the encrypted root filesystem.")
+            if wanted_fs != "btrfs":
+                require(home["target"] == "/", "Encrypted ext4/XFS home must remain a directory in the root filesystem.")
         if wanted_fs == "btrfs":
             require(root["fsroot"] == "/root" and "compress=zstd:1" in root["options"].split(","),
                     "Installed Btrfs root lacks its root subvolume or zstd:1 compression.")
@@ -345,7 +372,7 @@ def plan_for(scenario, total, preserved=None):
     This exercises partition execution, not the graphical layout planner.
     All endpoints are inclusive 512-byte sectors on the isolated virtual disk.
     """
-    bios_area = scenario == "bios-ext4"
+    bios_area = scenario in {"bios-ext4", "bios-luks-ext4"}
     if scenario.startswith("bios-"):
         boot_start = 3 if bios_area else 1
         root_start = boot_start + 2048
@@ -363,7 +390,7 @@ def plan_for(scenario, total, preserved=None):
                        (swap_start, total - 2049, "linux-swap", "swap", "SWAP")]
         else:
             last = preserved["start"] - 1 if preserved else total - 2049
-            bounds += [(2649 * 2048, last, "btrfs", "/", "ROOT")]
+            bounds += [(2649 * 2048, last, "xfs" if scenario == "uefi-luks-xfs" else "btrfs", "/", "ROOT")]
         table = "gpt"
     plan = [] if preserved else [{"type": "disk", "operate": "new", "device": "/dev/vda", "diskType": table}]
     if preserved:
@@ -387,7 +414,8 @@ def plan_for(scenario, total, preserved=None):
                      "id": f"vmtest-{index}", "index": index, "partType": "primary", "label": label,
                      "startPoint": start, "endPoint": end, "sectorSize": 512,
                      "size": (end - start + 1) * 512 // 1024**2, "deviceSize": total * 512 // 1024**2,
-                     "isstartpoint": True, "filesystem": filesystem, "mountPoint": mount, "isneedformat": True})
+                     "isstartpoint": True, "filesystem": filesystem, "mountPoint": mount, "isneedformat": True,
+                     "isCrypt": "-luks-" in scenario and mount == "/"})
     if preserved:
         plan.append({"type": "partition", "operate": "edit", "device": "/dev/vda", "path": preserved["path"],
                      "id": "keep-home", "index": 2, "partType": "primary", "label": "KEEPHOME",
@@ -401,7 +429,7 @@ def plan_for(scenario, total, preserved=None):
 def prepare():
     require("rd.live.image" in Path("/proc/cmdline").read_text().split(), "Installation requires the Live boot.")
     scenario = test_context()["scenario"]
-    disk_size = 16_000_000_000 if scenario == "uefi-small" else 64 * 1024**3
+    disk_size = 16_000_000_000 if scenario in {"uefi-small", "uefi-luks-btrfs-small"} else 64 * 1024**3
     disks = json.loads(run(["lsblk", "--json", "--bytes", "--nodeps", "--output", "PATH,SERIAL,SIZE,TYPE,RO"]).stdout)["blockdevices"]
     targets = [d for d in disks if str(d.get("serial", "")).strip() == "FDDESMOKE"]
     require(len(targets) == 1 and targets[0]["path"] == "/dev/vda"
@@ -447,18 +475,109 @@ def configure_account():
 
 def installed_state():
     state = json.loads(STATE.read_text())
-    require(state.get("phase") == "finalized" and not state.get("owned_mounts"), "Installation did not finalize cleanly.")
+    require(state.get("phase") == "finalized" and not state.get("owned_mounts")
+            and not state.get("owned_mappers"), "Installation did not finalize cleanly.")
     for key in ("DI_PASSWORD", "DI_ROOT_PASSWORD", "DI_CRYPT_PASSWORD"):
         require(not run([CONFIG_TOOL, "get", str(CONFIG), "", key]).stdout, "An installer secret was not cleared.")
     root = next(item for item in state["mounts"] if item["mountpoint"] == "/")
-    uuid = run(["blkid", "-s", "UUID", "-o", "value", root["device"]]).stdout.strip()
+    encrypted = state.get("encrypted_root")
+    if encrypted:
+        require(not Path(encrypted["mapper"]).exists(), "The installer left its encrypted mapper open.")
+        uuid = encrypted["filesystem_uuid"]
+        require(root.get("uuid") == uuid, "The saved encrypted filesystem UUIDs disagree.")
+        run(["cryptsetup", "isLuks", "--type", "luks2", encrypted["device"]])
+        require(run(["cryptsetup", "luksUUID", encrypted["device"]]).stdout.strip() == encrypted["uuid"],
+                "The finalized LUKS UUID changed.")
+    else:
+        uuid = run(["blkid", "-s", "UUID", "-o", "value", root["device"]]).stdout.strip()
     require(bool(re.fullmatch(r"[A-Fa-f0-9-]+", uuid)), "Installed root UUID is invalid.")
     swap = next((item for item in state["mounts"] if item["mountpoint"] == "swap"), None)
     swap_uuid = run(["blkid", "-s", "UUID", "-o", "value", swap["device"]]).stdout.strip() if swap else None
     return {"phase": state["phase"], "root_uuid": uuid, "swap_uuid": swap_uuid, "mounts": state["mounts"],
             "installation_id": state["installation_id"], "install_profile": state["install_profile"],
             "kernels": state.get("kernels", []), "kernel_options": state.get("kernel_options", ""),
-            "owned_mounts": state["owned_mounts"], "secrets_cleared": True}
+            "owned_mounts": state["owned_mounts"], "owned_mappers": state.get("owned_mappers", []),
+            "encrypted_root": encrypted, "secrets_cleared": True}
+
+
+def encryption_check(phase):
+    require(phase in {"target", "installed"}, "Invalid encryption verification phase.")
+    test = test_context()
+    require("-luks-" in test["scenario"], "This scenario does not request encryption.")
+    installation = json.loads(STATE.read_text()) if phase == "target" else test["installation"]
+    record = installation.get("encrypted_root")
+    require(isinstance(record, dict) and record.get("name") == "luks-" + record.get("uuid", ""),
+            "Missing encrypted root record.")
+    target = Path(installation["target"]) if phase == "target" else Path("/")
+    root = mount_info(str(target))
+    require(root.get("uuid") == record["filesystem_uuid"] and root.get("fstype") == record["fstype"],
+            "The mounted encrypted root does not match its inner filesystem identity.")
+    require(Path(root["source"].split("[", 1)[0]).resolve() == Path(record["mapper"]).resolve(),
+            "The root is not mounted through its expected encryption mapper.")
+    run(["cryptsetup", "isLuks", "--type", "luks2", record["device"]])
+    require(run(["cryptsetup", "luksUUID", record["device"]]).stdout.strip() == record["uuid"],
+            "The physical LUKS UUID differs from the installation record.")
+    metadata = json.loads(run(["cryptsetup", "luksDump", "--dump-json-metadata", record["device"]]).stdout)
+    keyslots = metadata.get("keyslots", {})
+    require(len(keyslots) == 1 and all(value.get("kdf", {}).get("type") == "argon2id" for value in keyslots.values()),
+            "Expected exactly one Argon2id password keyslot.")
+    rows = [line.split() for line in (target / "etc/crypttab").read_text().splitlines()
+            if line.strip() and not line.lstrip().startswith("#")]
+    require(rows == [[record["name"], "UUID=" + record["uuid"], "none", "luks,x-initrd.attach"]],
+            "crypttab does not request password-only encrypted root activation.")
+    expected_argument = "rd.luks.uuid=luks-" + record["uuid"]
+    require(expected_argument in (target / "etc/kernel/cmdline").read_text().split(),
+            "Kernel installation defaults lack the encrypted root UUID.")
+    if phase == "installed":
+        require(expected_argument in Path("/proc/cmdline").read_text().split(),
+                "The disk-only boot did not use the encrypted root argument.")
+        summary = json.loads((target / "var/log/fedora-dde-installer/install-summary.json").read_text())
+        require(summary.get("encryption") == {"type": "luks2", "uuid": record["uuid"]},
+                "The installed summary does not record this encrypted installation.")
+    checked = []
+    for relative in ("etc/crypttab", "etc/kernel/cmdline", "etc/fstab", "etc/fedora-dde-installer",
+                     "boot/loader/entries", "var/log/fedora-dde-installer"):
+        candidate = target / relative
+        files = sorted(candidate.rglob("*")) if candidate.is_dir() else [candidate]
+        for path in files:
+            if path.is_file() and not path.is_symlink():
+                require(path.stat().st_size <= 32 * 1024**2, "Unexpectedly large installer configuration or log.")
+                require(CRYPT_PASSWORD.encode() not in path.read_bytes(),
+                        "The test encryption passphrase leaked into target configuration or logs.")
+                checked.append(str(path.relative_to(target)))
+    if phase == "target":
+        for path in (CONFIG, STATE, CONFIG.with_name("partition-policy.json")):
+            require(CRYPT_PASSWORD.encode() not in path.read_bytes(),
+                    "The encryption passphrase leaked into installer runtime configuration.")
+        wrong = run(["cryptsetup", "open", "--test-passphrase", "--key-file", "-", record["device"]],
+                    input_text="DeliberatelyWrongVmPassphrase", check=False)
+        require(wrong.returncode == 2, "cryptsetup did not reject the wrong passphrase as an authentication failure.")
+        run(["cryptsetup", "open", "--test-passphrase", "--key-file", "-", record["device"]],
+            input_text=CRYPT_PASSWORD)
+    return {"type": "luks2", "luks_uuid": record["uuid"], "filesystem_uuid": record["filesystem_uuid"],
+            "filesystem": record["fstype"], "keyslots": len(keyslots), "kdf": "argon2id",
+            "crypttab_key_file": "none", "checked_secret_free_files": checked,
+            "wrong_and_correct_passphrase_checked": phase == "target", "phase": phase}
+
+
+def run_backend(stage):
+    descriptor = None
+    try:
+        extra_env = {}
+        if "-luks-" in test_context()["scenario"] and stage in {"preflight", "partition"}:
+            descriptor = os.memfd_create("fedora-dde-crypt-passphrase", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+            os.fchmod(descriptor, 0o600)
+            os.write(descriptor, CRYPT_PASSWORD.encode())
+            fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS,
+                        fcntl.F_SEAL_SEAL | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_WRITE)
+            extra_env["FEDORA_DDE_CRYPT_FD"] = str(descriptor)
+        return run(["/bin/bash", "-c", "source /usr/share/fedora-dde-installer/tools/scripts/init_environment.sh; "
+                    'exec /usr/bin/python3 -I "$DI_INSTALL_TOOLS_DIR_ENV/scripts/fedora_backend.py" "$1"',
+                    "vmtest", stage], timeout=3600, capture=False, check=False,
+                   extra_env=extra_env, pass_fds=(descriptor,) if descriptor is not None else ())
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def pam_check(user):
@@ -590,6 +709,8 @@ def main():
         result = configure_account()
     elif action == "installed-state":
         result = installed_state()
+    elif action == "encryption-check":
+        result = encryption_check(*args)
     elif action == "pam":
         result = pam_check(*args)
     elif action == "diagnostics":
@@ -598,10 +719,7 @@ def main():
         require(len(args) == 1 and args[0] in STAGES, "Invalid backend stage.")
         stage = args[0]
         print(f"VMTEST_BACKEND_START {stage}", flush=True)
-        completed = run(["/bin/bash", "-c", "source /usr/share/fedora-dde-installer/tools/scripts/init_environment.sh; "
-                         'exec /usr/bin/python3 -I "$DI_INSTALL_TOOLS_DIR_ENV/scripts/fedora_backend.py" "$1"',
-                         "vmtest", stage],
-                        timeout=3600, capture=False, check=False)
+        completed = run_backend(stage)
         require(completed.returncode == 0, f"Actual installer backend {stage} failed ({completed.returncode}).")
         result = {"stage": stage, "status": "passed", "state": json.loads(STATE.read_text()).get("phase")}
     else:

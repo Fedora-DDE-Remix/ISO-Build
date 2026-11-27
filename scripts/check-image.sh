@@ -66,10 +66,12 @@ mapfile -t selinux_paths <<< "$label_paths"
 unsquashfs -xattrs -no-progress -d "$temporary/root" "$temporary/payload.img" \
     etc/passwd etc/shadow etc/selinux/config \
     etc/fedora-dde-installer/install-profile.json \
+    etc/yum.repos.d etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-dde-remix \
     etc/kernel/install.d etc/dracut.conf.d \
     usr/lib/os-release usr/lib/kernel/install.d \
     usr/lib/dracut/dracut.conf.d/02-rescue.conf \
     usr/lib/systemd/system/fedora-dde-live.service usr/libexec/fedora-dde-live \
+    usr/libexec/fedora-dde-check-copr \
     usr/lib/systemd/system/ddm.service.d/20-fedora-kmscon.conf \
     usr/lib/sysimage/rpm \
     usr/share/fedora-dde-remix/rpm-manifest.txt \
@@ -79,6 +81,9 @@ unsquashfs -xattrs -no-progress -d "$temporary/root" "$temporary/payload.img" \
     > "$report_dir/payload-extract.log"
 python3 "$script_dir/check-selinux.py" verify "$temporary/root" \
     | tee "$report_dir/selinux-labels.txt"
+cmp "$script_dir/check-copr.py" "$temporary/root/usr/libexec/fedora-dde-check-copr"
+python3 "$script_dir/check-copr.py" --root "$temporary/root" \
+    | tee "$report_dir/copr-repository.json"
 
 python3 - "$temporary/root" "$manifest" "$build_info" <<'PY'
 from pathlib import Path
@@ -153,8 +158,12 @@ required = {'dde-desktop-comps', 'ddm', 'dde-session', 'dde-shell', 'treeland',
             'fedora-dde-installer', 'fedora-dde-remix-config', 'kernel-core',
             'dracut-live', 'dracut-config-rescue', 'grub2-pc-modules', 'grub2-efi-x64-cdboot',
             'ddm-selinux', 'dde-daemon-selinux', 'dde-api-selinux', 'deepin-system-monitor-selinux',
-            'selinux-policy-targeted', 'policycoreutils', 'libselinux-utils'}
+            'selinux-policy-targeted', 'policycoreutils', 'libselinux-utils',
+            'cryptsetup', 'systemd-cryptsetup'}
 assert required <= names, f'Required RPMs missing: {sorted(required - names)}'
+for package in data['dfm_hotfix']['runtime_rpms']:
+    expected_package = f"{package['name']}\t{package['epoch']}:{package['version']}-{package['release']}\t{package['arch']}"
+    assert expected_package in included.decode().splitlines(), 'The payload lacks a pinned DFM hotfix RPM: ' + expected_package
 assert 'systemd-homed' not in names, 'systemd-homed is not supported by this image'
 print(f'Payload verified: Fedora 45, {len(names)} package names, no baked-in Live account.')
 print(f'DDM tty1 conflict verified; payload RPM owner: {owner_manifest}')
@@ -165,6 +174,7 @@ printf '%s\n' \
     'Payload: direct read-only SquashFS with dmsquash-live initrd' \
     'Actual payload SELinux xattrs: core system/DDM types and image-policy mountpoint contexts verified' \
     'DDM tty1 kmscon conflict: present and owned by the provenance-matched image configuration RPM' \
+    'Persistent COPR repository: enabled, package-owned, verified key and RPM/TLS checks enabled' \
     'Conventional kernel-install and rescue hooks: preserved' \
     'Temporary Live account and empty password entries: absent' \
     'Embedded and external RPM manifests: identical' \

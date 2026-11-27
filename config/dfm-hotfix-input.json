@@ -1,0 +1,20 @@
+{
+  "release": "9.1.remix1.fc45",
+  "upstream_commit": "bdd0f409316054d136eeb8eb7a132a977e4915f7",
+  "run_id": 45950112995,
+  "schema": 2,
+  "maintainer_commit": "adcd681b0b9e68cacbf9daa33bede62a253a3315",
+  "repository": "Fedora-DDE-Remix/ISO-Build",
+  "patch_sha256": "40b726528a34f41cdcbba4a538e5fc9b08fb3b354f8c340f905ead2c0d3d0381",
+  "validation_commit": "d32994ddf1664bdd2d292822540a9ea299d415fe",
+  "build_commit": "ab1626ed9504613fcd9190eb48e484401c9d7961",
+  "version": "6.6.7",
+  "source_artifact": {
+    "id": 15177359692,
+    "sha256": "9854fe0f8539d2b201fddf5d860afc1b7ad39abca371acb902106fe39e73a0a2",
+    "size_in_bytes": 333599067
+  },
+  "validation_run_id": 45956698212,
+  "artifact_id": 15179002203,
+  "sha256": "cb994dc1d42ba43de29caa8ba56e1ff8a5ce9ba27805fc9679a8890261d87631"
+}
