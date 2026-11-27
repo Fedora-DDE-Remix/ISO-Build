@@ -15,7 +15,7 @@ source /workspace/config/build.env
 [[ -d /installer/.git && -d /workspace/.git ]]
 mkdir -p /work/rpms /output/logs /output/rpms
 
-dnf -y install dnf5-plugins /usr/bin/curl python3
+dnf -y install dnf5-plugins /usr/bin/curl python3 diffutils
 dnf -y copr enable mozixun/Fedora-DDE-Remix
 
 # Use the maintainer's published repository and reuse the exact verified
