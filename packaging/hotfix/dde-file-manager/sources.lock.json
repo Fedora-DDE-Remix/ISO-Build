@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "maintainer_repository": "Fedora-DDE-Remix/Deepin-Desktop-Environment",
+  "maintainer_commit": "adcd681b0b9e68cacbf9daa33bede62a253a3315",
+  "upstream_repository": "linuxdeepin/dde-file-manager",
+  "upstream_commit": "bdd0f409316054d136eeb8eb7a132a977e4915f7",
+  "files": {
+    "dde-file-manager.spec": "027e3b17c2870fcf571ab11e6821f0762da0d4aee7f71e7e2bd68628e8591dc2",
+    "maintainer/dde-file-manager.spec": "89d681b37bb20d9ae7b45befbca29beb23110fcc1ed23da36a8e967efb5c0b69",
+    "maintainer/LICENSE": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+    "01-fedora-disable-appimage-qt611.patch": "fb10cffddb248060e5a7ad0a5c22fe4e2c07537c34266debc3300ed94f806d38",
+    "02-pc-remove-libappimage.patch": "bf098e3f8aba6625a79fe5ae0b96ddf6a43e94c50a729ad93f48f5a6324c8095",
+    "0001-dpf-centralize-event-converter.patch": "40b726528a34f41cdcbba4a538e5fc9b08fb3b354f8c340f905ead2c0d3d0381"
+  }
+}

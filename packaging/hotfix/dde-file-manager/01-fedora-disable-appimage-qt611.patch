@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mozixun <mozixun@fedoraproject.org>
+Date: Sat, 21 Nov 2026 00:00:00 +0800
+Subject: [PATCH] Fedora: disable libappimage and fix Qt 6.11 build
+
+Fedora does not ship libappimage.  Keep the AppImage MIME handling but
+return an empty thumbnail for AppImage files, matching the upstream
+DFM_DISABLE_APPIMAGE path that already exists in the source.
+
+Also pass an explicit uint to QString::arg for Qt 6.11.
+
+diff --git a/cmake/DFMLibraryConfig.cmake b/cmake/DFMLibraryConfig.cmake
+--- a/cmake/DFMLibraryConfig.cmake
++++ b/cmake/DFMLibraryConfig.cmake
+@@ -13,9 +13,10 @@
+     find_package(dfm${DTK_VERSION_MAJOR}-io REQUIRED)
+     find_package(dfm${DTK_VERSION_MAJOR}-mount REQUIRED)
+     find_package(dfm${DTK_VERSION_MAJOR}-burn REQUIRED)
+-    find_package(libappimage REQUIRED)
+     find_package(PkgConfig REQUIRED)
+     
++    add_compile_definitions(DFM_DISABLE_APPIMAGE)
++
+     # System dependencies
+     pkg_check_modules(gio REQUIRED gio-unix-2.0 IMPORTED_TARGET)
+     pkg_check_modules(mount REQUIRED mount IMPORTED_TARGET)
+@@ -81,7 +82,6 @@
+         PRIVATE
+             poppler-cpp
+             ${LIBHEIF_LIBRARIES}
+-            libappimage
+             PkgConfig::MINIZIP
+     )
+     
+diff --git a/src/dfm-base/utils/thumbnail/thumbnailcreators.cpp b/src/dfm-base/utils/thumbnail/thumbnailcreators.cpp
+--- a/src/dfm-base/utils/thumbnail/thumbnailcreators.cpp
++++ b/src/dfm-base/utils/thumbnail/thumbnailcreators.cpp
+@@ -33,7 +33,9 @@
+ #include <poppler/cpp/poppler-page.h>
+ #include <poppler/cpp/poppler-page-renderer.h>
+ 
++#ifndef DFM_DISABLE_APPIMAGE
+ #include <appimage/appimage.h>
++#endif
+ 
+ static constexpr char kFormat[] { ".png" };
+ 
+@@ -569,6 +571,11 @@
+ 
+ QImage ThumbnailCreators::appimageThumbnailCreator(const QString &filePath, ThumbnailSize size)
+ {
++#ifdef DFM_DISABLE_APPIMAGE
++    Q_UNUSED(filePath);
++    Q_UNUSED(size);
++    return QImage();
++#else
+     qCDebug(logDFMBase) << "thumbnail: creating AppImage thumbnail for:" << filePath << "size:" << size;
+ 
+     // 1. Check if AppImage exists
+@@ -623,6 +630,7 @@
+ 
+     qCDebug(logDFMBase) << "thumbnail: AppImage thumbnail created successfully for:" << filePath;
+     return icon;
++#endif
+ }
+ 
+ QImage ThumbnailCreators::pptxThumbnailCreator(const QString &filePath, ThumbnailSize size)
+diff --git a/src/plugins/filemanager/dfmplugin-disk-encrypt-entry/utils/encryptutils.cpp b/src/plugins/filemanager/dfmplugin-disk-encrypt-entry/utils/encryptutils.cpp
+--- a/src/plugins/filemanager/dfmplugin-disk-encrypt-entry/utils/encryptutils.cpp
++++ b/src/plugins/filemanager/dfmplugin-disk-encrypt-entry/utils/encryptutils.cpp
+@@ -688,7 +688,7 @@
+         if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')) {
+             encoded.append(ch);
+         } else {
+-            encoded.append(QString("_%1").arg(ch.unicode(), 2, 16, QChar('0')));
++            encoded.append(QString("_%1").arg(static_cast<uint>(ch.unicode()), 2, 16, QChar('0')));
+         }
+     }
+     return encoded;
+*** End of patch

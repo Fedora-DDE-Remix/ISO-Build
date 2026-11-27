@@ -1,0 +1,67 @@
+name: Diagnose packaged DPF
+
+on:
+  push:
+    branches:
+      - 'diagnose-dpf-*'
+    paths:
+      - '.github/workflows/diagnose-dpf.yml'
+      - 'scripts/diagnose-dpf/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  packaged-probe:
+    name: Fedora 45 packaged Qt and DPF
+    runs-on: ubuntu-24.04
+    container: registry.fedoraproject.org/fedora:45
+    timeout-minutes: 30
+    steps:
+      - name: Install diagnostic tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          dnf -y install git cmake gcc-c++ ninja-build rpm-build redhat-rpm-config \
+            binutils python3 dnf5-plugins pkgconf-pkg-config \
+            2>&1 | tee "$RUNNER_TEMP/dpf-tooling.log"
+
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install the existing COPR SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/dpf/repositories
+          cp "$RUNNER_TEMP/dpf-tooling.log" artifacts/dpf/tooling.log
+          dnf -y copr enable mozixun/Fedora-DDE-Remix fedora-45-x86_64 \
+            2>&1 | tee artifacts/dpf/copr-enable.log
+          cat /etc/yum.repos.d/*copr*.repo > artifacts/dpf/repositories/copr.repo
+          dnf -y --refresh install qt6-qtbase-devel dde-file-manager-devel \
+            dde-file-manager-desktop dde-shell \
+            2>&1 | tee artifacts/dpf/sdk-install.log
+
+      - name: Inspect and exercise the packaged event bridge
+        shell: bash
+        run: bash scripts/diagnose-dpf/run.sh artifacts/dpf
+
+      - name: Preserve tooling log
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p artifacts/dpf
+          if test -f "$RUNNER_TEMP/dpf-tooling.log"; then
+            cp "$RUNNER_TEMP/dpf-tooling.log" artifacts/dpf/tooling.log
+          fi
+
+      - name: Upload complete diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: DPF-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/dpf/
+          if-no-files-found: error
+          retention-days: 30

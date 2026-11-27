@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "repository": "Fedora-DDE-Remix/ISO-Build",
+  "iso_run_id": 46002723335,
+  "iso_artifact_name": "Fedora-DDE-Remix-45.20261127.4-x86_64-17",
+  "iso_commit": "ec9903e1addf5e487f468680c6af4e34ce6bf873",
+  "iso_sha256": "94009516d1751403a77bb24252ff097f3a85943d87430f11b5b2dd0dc808274a",
+  "scenario": "uefi-xfs-home-swap"
+}

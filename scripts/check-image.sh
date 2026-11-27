@@ -66,19 +66,37 @@ mapfile -t selinux_paths <<< "$label_paths"
 unsquashfs -xattrs -no-progress -d "$temporary/root" "$temporary/payload.img" \
     etc/passwd etc/shadow etc/selinux/config \
     etc/fedora-dde-installer/install-profile.json \
+    etc/yum.repos.d etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-dde-remix \
     etc/kernel/install.d etc/dracut.conf.d \
     usr/lib/os-release usr/lib/kernel/install.d \
     usr/lib/dracut/dracut.conf.d/02-rescue.conf \
     usr/lib/systemd/system/fedora-dde-live.service usr/libexec/fedora-dde-live \
+    usr/libexec/fedora-dde-check-copr \
+    usr/libexec/fedora-dde-check-desktop-assets \
     usr/lib/systemd/system/ddm.service.d/20-fedora-kmscon.conf \
+    usr/bin/systemd-cryptsetup \
+    usr/lib/systemd/system-generators/systemd-cryptsetup-generator \
     usr/lib/sysimage/rpm \
     usr/share/fedora-dde-remix/rpm-manifest.txt \
     usr/share/fedora-dde-remix/build-info.json \
+    usr/share/backgrounds/images/earth_from_space.jpg \
+    usr/share/pixmaps/fedora-remix-logos/Fedora-Remix-Black-Blue.png \
+    usr/share/pixmaps/fedora-remix-logos/Fedora-Remix-Transparent-Blue.png \
+    usr/share/deepin/distribution.info \
+    usr/share/dsg/configs/overrides/org.deepin.dde.treeland \
+    usr/share/dsg/configs/overrides/org.deepin.dde.appearance \
+    usr/share/glib-2.0/schemas \
     usr/share/applications/fedora-dde-installer.desktop \
     "${selinux_paths[@]}" \
     > "$report_dir/payload-extract.log"
 python3 "$script_dir/check-selinux.py" verify "$temporary/root" \
     | tee "$report_dir/selinux-labels.txt"
+cmp "$script_dir/check-copr.py" "$temporary/root/usr/libexec/fedora-dde-check-copr"
+python3 "$script_dir/check-copr.py" --root "$temporary/root" \
+    | tee "$report_dir/copr-repository.json"
+cmp "$script_dir/check-desktop-assets.py" "$temporary/root/usr/libexec/fedora-dde-check-desktop-assets"
+python3 "$script_dir/check-desktop-assets.py" --root "$temporary/root" \
+    | tee "$report_dir/desktop-assets.json"
 
 python3 - "$temporary/root" "$manifest" "$build_info" <<'PY'
 from pathlib import Path
@@ -148,14 +166,47 @@ assert len(owner) == 5 and owner[0] == 'fedora-dde-remix-config' and owner[4] ==
 assert owner[2] == data.get('image_version'), 'DDM configuration RPM version differs from the image provenance'
 owner_manifest = f'{owner[0]}\t{owner[1]}:{owner[2]}-{owner[3]}\t{owner[4]}'
 assert owner_manifest in included.decode().splitlines(), 'DDM configuration RPM owner is absent from the payload manifest'
+for relative in ('usr/bin/systemd-cryptsetup',
+                 'usr/lib/systemd/system-generators/systemd-cryptsetup-generator'):
+    executable = regular(relative)
+    assert executable.stat().st_mode & 0o111, f'Encryption boot component is not executable: {relative}'
+    provider = subprocess.check_output(
+        ['rpm', '--root', str(root), '--dbpath', '/usr/lib/sysimage/rpm',
+         '-qf', '/' + relative, '--qf', '%{NAME}\n'], text=True).strip()
+    assert provider == 'systemd-udev', f'Unexpected Fedora encryption component provider: {relative}: {provider}'
 names = {line.split('\t')[0] for line in included.decode().splitlines()}
 required = {'dde-desktop-comps', 'ddm', 'dde-session', 'dde-shell', 'treeland',
             'fedora-dde-installer', 'fedora-dde-remix-config', 'kernel-core',
             'dracut-live', 'dracut-config-rescue', 'grub2-pc-modules', 'grub2-efi-x64-cdboot',
             'ddm-selinux', 'dde-daemon-selinux', 'dde-api-selinux', 'deepin-system-monitor-selinux',
-            'selinux-policy-targeted', 'policycoreutils', 'libselinux-utils'}
+            'selinux-policy-targeted', 'policycoreutils', 'libselinux-utils',
+            'cryptsetup', 'systemd-udev', 'deepin-desktop-schemas', 'desktop-backgrounds-basic',
+            'generic-logos', 'fedora-remix-logos'}
 assert required <= names, f'Required RPMs missing: {sorted(required - names)}'
+for package in data['dfm_hotfix']['runtime_rpms']:
+    expected_package = f"{package['name']}\t{package['epoch']}:{package['version']}-{package['release']}\t{package['arch']}"
+    assert expected_package in included.decode().splitlines(), 'The payload lacks a pinned DFM hotfix RPM: ' + expected_package
+base = data['desktop_base_hotfix']
+assert (base['name'], base['version'], base['release']) == (
+    'deepin-desktop-base', '2026.10.28', '1.1.remix1.fc45'), 'Unexpected desktop-base hotfix identity'
+base_header = subprocess.check_output(
+    ['rpm', '--root', str(root), '--dbpath', '/usr/lib/sysimage/rpm', '-q', base['name'],
+     '--qf', '%{EPOCHNUM}\t%{VERSION}\t%{RELEASE}\t%{ARCH}\t%{SOURCERPM}'], text=True).split('\t')
+assert base_header == ['0', base['version'], base['release'], 'noarch', base['binary_rpm']['source_rpm']], 'Payload desktop-base differs from the recorded temporary RPM'
+base_requires = subprocess.check_output(
+    ['rpm', '--root', str(root), '--dbpath', '/usr/lib/sysimage/rpm', '-q', '--requires', base['name']], text=True).splitlines()
+assert 'system-logos' in base_requires and not any(line.split()[0] == 'fedora-logos' for line in base_requires if line.strip()), 'Desktop base still requires primary Fedora artwork'
+schemas = data['schemas_hotfix']
+assert (schemas['name'], schemas['version'], schemas['release']) == (
+    'deepin-desktop-schemas', '6.0.13', '1.1.remix1.fc45'), 'Unexpected schema repair identity'
+assert schemas.get('build_success') is True and schemas['strict_schema_check'].get('success') is True \
+    and schemas['strict_schema_check'].get('command') == 'glib-compile-schemas --strict --dry-run', 'The schema repair lacks its successful strict build check'
+schemas_header = subprocess.check_output(
+    ['rpm', '--root', str(root), '--dbpath', '/usr/lib/sysimage/rpm', '-q', schemas['name'],
+     '--qf', '%{EPOCHNUM}\t%{VERSION}\t%{RELEASE}\t%{ARCH}\t%{SOURCERPM}'], text=True).split('\t')
+assert schemas_header == ['0', schemas['version'], schemas['release'], 'noarch', schemas['binary_rpm']['source_rpm']], 'Payload schemas differ from the recorded temporary RPM'
 assert 'systemd-homed' not in names, 'systemd-homed is not supported by this image'
+assert 'fedora-logos' not in names, 'The Remix image must use generic system artwork and the Remix mark'
 print(f'Payload verified: Fedora 45, {len(names)} package names, no baked-in Live account.')
 print(f'DDM tty1 conflict verified; payload RPM owner: {owner_manifest}')
 PY
@@ -165,6 +216,10 @@ printf '%s\n' \
     'Payload: direct read-only SquashFS with dmsquash-live initrd' \
     'Actual payload SELinux xattrs: core system/DDM types and image-policy mountpoint contexts verified' \
     'DDM tty1 kmscon conflict: present and owned by the provenance-matched image configuration RPM' \
+    'Persistent COPR repository: enabled, package-owned, verified key and RPM/TLS checks enabled' \
+    'Encryption boot executable and generator: present, executable and owned by systemd-udev' \
+    'Desktop wallpaper/logo assets: Fedora RPM owners and compiled defaults verified' \
+    'Desktop schema repair: native strict build result, installed RPM identity and compiled XF86Away binding verified' \
     'Conventional kernel-install and rescue hooks: preserved' \
     'Temporary Live account and empty password entries: absent' \
     'Embedded and external RPM manifests: identical' \

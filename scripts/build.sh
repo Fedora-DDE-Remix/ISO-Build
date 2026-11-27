@@ -15,7 +15,7 @@ source /workspace/config/build.env
 [[ -d /installer/.git && -d /workspace/.git ]]
 mkdir -p /work/rpms /output/logs /output/rpms
 
-dnf -y install dnf5-plugins /usr/bin/curl python3
+dnf -y install dnf5-plugins /usr/bin/curl python3 diffutils
 dnf -y copr enable mozixun/Fedora-DDE-Remix
 
 # Use the maintainer's published repository and reuse the exact verified
@@ -24,6 +24,7 @@ bash /workspace/scripts/prepare-comps.sh
 install -m644 /work/comps-input.json /output/comps-input.json
 cp -a /work/comps-bootstrap/*.rpm /output/rpms/
 install -m644 /work/comps-bootstrap/pubkey.gpg /output/rpms/comps-pubkey.gpg
+cmp /work/comps-bootstrap/pubkey.gpg /workspace/config/RPM-GPG-KEY-fedora-dde-remix
 dnf group info dde-desktop | tee /output/dde-desktop-group.txt
 rpm -q dde-desktop-comps | tee /output/comps-version.txt
 
@@ -34,6 +35,9 @@ actual_ref=$(git -c safe.directory=/installer -C /installer rev-parse HEAD)
 [[ $actual_ref == "$INSTALLER_REF" ]]
 iso_ref=$(git -c safe.directory=/workspace -C /workspace rev-parse HEAD)
 export INSTALLER_REF FEDORA_RELEASE TARGET_ARCH CONFIG_VERSION iso_ref
+python3 /workspace/scripts/prepare-dfm-hotfix.py
+bash /workspace/scripts/build-desktop-base-hotfix.sh
+bash /workspace/scripts/build-schemas-hotfix.sh
 
 # The workflow checks the pinned archive digest and Actions run before making
 # this directory available read-only. No credentials enter this container.
@@ -44,10 +48,10 @@ from pathlib import Path
 marker = Path('/installer-rpms/verified-input.json')
 approved = {
     'schema': 1,
-    'commit': 'e10bf53ad51e0dea7cc5133052a0d8e0dc6bcce9',
-    'run_id': 45837838480,
-    'artifact_id': 15127527642,
-    'sha256': 'de0d2ce8467bdb0ace5c6a4719198b437e631e7b86127bc89b02959a29958751',
+    'commit': 'bd06acc59908771c726b907d65c92bc84b9f807d',
+    'run_id': 46001067422,
+    'artifact_id': 15198317588,
+    'sha256': '4f74da31a87cc93bdd5285d4ce15fb6033f5683d77bb5e0ae670c4441778098f',
 }
 
 def unique_keys(pairs):
@@ -102,7 +106,12 @@ if [[ $installer_input_mode == source-build ]]; then
         tee /output/logs/installer-rpmbuild.log
     installer_input_dir=$installer_top
 else
-    echo 'Reusing installer RPMs from verified Actions run 45837838480.'
+    python3 - <<'PY'
+import json
+from pathlib import Path
+info = json.loads(Path('/work/installer-input.json').read_text())
+print(f'Reusing installer RPMs from verified Actions run {info["run_id"]}.')
+PY
     installer_input_dir=/installer-rpms
 fi
 
@@ -167,8 +176,8 @@ try:
                    '/installer/packaging/fedora-dde-installer.spec').split('\t')
     if len(expected) != 4 or expected[0] != 'fedora-dde-installer':
         raise ValueError('cannot determine the pinned installer spec identity')
-    if reuse and expected[2] != '0.2.2':
-        raise ValueError('the approved installer artifact must match version 0.2.2')
+    if reuse and expected[2] != '0.3.0':
+        raise ValueError('the approved installer artifact must match version 0.3.0')
     binary_info = inspect(binary, expected, False)
     source_info = inspect(source, expected, True)
     if binary_info['source_rpm'] != source.name:
@@ -200,6 +209,9 @@ data = {
     'desktop_group': 'dde-desktop',
     'comps': json.loads(Path('/work/comps-input.json').read_text()),
     'installer_input': json.loads(Path('/work/installer-input.json').read_text()),
+    'dfm_hotfix': json.loads(Path('/work/dfm-hotfix-input.json').read_text()),
+    'desktop_base_hotfix': json.loads(Path('/work/desktop-base-hotfix-input.json').read_text()),
+    'schemas_hotfix': json.loads(Path('/work/schemas-hotfix-input.json').read_text()),
     'live_login': 'manual',
     'built_at_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
 }
@@ -211,8 +223,11 @@ config_top=/work/config-rpmbuild
 config_source=/work/config-sources/fedora-dde-remix-config-$CONFIG_VERSION
 mkdir -p "$config_top"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS} "$config_source"/{config,scripts}
 install -m644 /workspace/LICENSE /workspace/README.md "$config_source/"
-install -m644 /workspace/config/{install-profile.json,fedora-dde-live.service,ddm-kmscon.conf} "$config_source/config/"
+install -m644 /workspace/config/{install-profile.json,fedora-dde-live.service,ddm-kmscon.conf,fedora-dde-remix.repo,RPM-GPG-KEY-fedora-dde-remix} "$config_source/config/"
+install -m644 /workspace/config/{treeland-background.json,appearance-background.json,99-fedora-dde-remix-background.gschema.override,distribution.info} "$config_source/config/"
 install -m755 /workspace/scripts/configure-live.sh "$config_source/scripts/"
+install -m755 /workspace/scripts/check-copr.py "$config_source/scripts/"
+install -m755 /workspace/scripts/check-desktop-assets.py "$config_source/scripts/"
 tar -C /work/config-sources -czf "$config_top/SOURCES/fedora-dde-remix-config-$CONFIG_VERSION.tar.gz" \
     "fedora-dde-remix-config-$CONFIG_VERSION"
 rpmbuild --define "_topdir $config_top" -ba /workspace/packaging/fedora-dde-remix-config.spec \

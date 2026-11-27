@@ -1,0 +1,868 @@
+{
+  "schema": 1,
+  "image_version": "45.20261127.4",
+  "iso": {
+    "filename": "Fedora-DDE-Remix-45.20261127.4-x86_64.iso",
+    "sha256": "94009516d1751403a77bb24252ff097f3a85943d87430f11b5b2dd0dc808274a",
+    "size": 3462608896
+  },
+  "iso_source_commit": "ec9903e1addf5e487f468680c6af4e34ce6bf873",
+  "iso_source_tree": "6bb0dbbdc6024537fcf9232b8eb6a011efab3bb8",
+  "installer_commit": "bd06acc59908771c726b907d65c92bc84b9f807d",
+  "installer_version": "0.3.0-0.3.fc45",
+  "compose_job_url": "https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/46002723335/job/140518179572",
+  "iso_artifact_id": 15202111074,
+  "aggregate_status": "all_nine_scenarios_passed_across_original_run_and_same_iso_retest",
+  "original_run": {
+    "id": 46002723335,
+    "status": "completed",
+    "conclusion": "failure",
+    "reason": "uefi-xfs-home-swap host regression failed before ISO download/VM; eight other scenarios and compose passed",
+    "failed_job": 140533252729,
+    "failed_artifact": 15201068518
+  },
+  "retest_run": {
+    "id": 46008724244,
+    "status": "completed",
+    "conclusion": "success",
+    "test_commit": "7c80ee0f6176fdb708bd1296afba157988f12670",
+    "scenario": "uefi-xfs-home-swap",
+    "same_iso": true,
+    "iso_recomposed": false,
+    "host_regressions_passed": 58
+  },
+  "verification": {
+    "actual_evidence_zips_downloaded_and_rehashed": 9,
+    "live_installed_build_info_equals_compose_for_all_scenarios": true,
+    "guest_helper_sha256": "d17a799c71276b3e94cac43978fb51dbe689265593911e72d6d1065095405944",
+    "stage_namespace_identity_verified": true,
+    "normal_teardown_and_disk_only_boot_verified": true
+  },
+  "scope": {
+    "architecture": "x86_64",
+    "acceleration": "kvm",
+    "vcpus": 4,
+    "memory_mib": 8192,
+    "disk_count": 1,
+    "disk_interface": "virtio",
+    "sector_size": 512,
+    "small_disk_bytes": 16000000000,
+    "regular_disk_bytes": 68719476736,
+    "graphical_layout_planner_tested": false,
+    "secure_boot_tested": false,
+    "physical_hardware_tested": false,
+    "actual_rescue_boot_tested": false,
+    "kernel_upgrade_boot_tested": false,
+    "preservation_verified": "UUID, PARTUUID, start/end sectors, sample marker existence and SHA256; UID/GID/mode/ACL/xattrs not compared",
+    "encryption_verified": "wrong/correct passphrase test before reboot, actual initramfs prompt and correct passphrase disk boot; existing LUKS/LVM/multiple containers not covered"
+  },
+  "observations": [
+    {
+      "scenario": "uefi-xfs-home-swap",
+      "run_id": 46008724244,
+      "phase": "live graphical login, before installer namespace entry",
+      "avc_records": 22,
+      "avc_subject": "kmscon_t",
+      "avc_permission": "getattr",
+      "avc_target": "tmpfs_t:filesystem",
+      "permissive": 0,
+      "installed_capture_avc_records": 0,
+      "scope": "Existing untruncated diagnostics capture only; not a zero-AVC claim or root cause attribution; no SELinux policy broadening"
+    }
+  ],
+  "scenarios": [
+    {
+      "scenario": "uefi-luks-btrfs-small",
+      "status": "passed",
+      "run_id": 46002723335,
+      "job_id": 140529003262,
+      "job_url": "https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/46002723335/job/140529003262",
+      "test_commit": "ec9903e1addf5e487f468680c6af4e34ce6bf873",
+      "artifact": {
+        "id": 15200938525,
+        "name": "ISO-installation-evidence-uefi-luks-btrfs-small-46002723335-1",
+        "url": "https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/46002723335/artifacts/15200938525",
+        "size_in_bytes": 9613138,
+        "sha256": "e58279adf83bf512b579db44daea042ca2e54590d9a5837dc36a5d94adf6f860"
+      },
+      "report_sha256": "6f71a5c7148ca759f729e3199659b04ec935e7ae972bb3eb3958575e360361bc",
+      "elapsed_seconds": 442.51,
+      "firmware": {
+        "code": "/usr/share/OVMF/OVMF_CODE_4M.fd",
+        "mode": "uefi",
+        "sha256": "ad23261d43116abc3747d59a7837fbf578c9586a8993f4eeba064cd07eccb083",
+        "vars_template": "/usr/share/OVMF/OVMF_VARS_4M.fd"
+      },
+      "disk_bytes": 16000000000,
+      "root": {
+        "fsroot": "/root",
+        "fstype": "btrfs",
+        "options": "rw,relatime,seclabel,compress=zstd:1,space_cache=v2,subvolid=256,subvol=/root",
+        "source": "/dev/mapper/luks-172efee3-beed-4c88-abc8-c8e827058778[/root]",
+        "target": "/",
+        "uuid": "2560594e-3924-494d-8989-8b91aa04df5f"
+      },
+      "home": {
+        "fsroot": "/home",
+        "fstype": "btrfs",
+        "options": "rw,relatime,seclabel,compress=zstd:1,space_cache=v2,subvolid=257,subvol=/home",
+        "source": "/dev/mapper/luks-172efee3-beed-4c88-abc8-c8e827058778[/home]",
+        "target": "/home",
+        "uuid": "2560594e-3924-494d-8989-8b91aa04df5f"
+      },
+      "active_swap": null,
+      "zram_observed_in_installed_diagnostics": true,
+      "mount_namespace": {
+        "after": {
+          "device": 5,
+          "inode": 4026532662
+        },
+        "authentication": "existing ordinary account and sudo shell",
+        "before": {
+          "device": 5,
+          "inode": 4026531832
+        },
+        "executor": "/usr/share/fedora-dde-installer/tools/scripts/fedora_namespace.py",
+        "uid": 0
+      },
+      "finalized": {
+        "phase": "finalized",
+        "owned_mounts": [],
+        "owned_mappers": [],
+        "secrets_cleared": true
+      },
+      "boot_ids": {
+        "live": "29c2f1ab-69bd-4402-b446-2f8289fe4111",
+        "installed": "99f7153c-0b7f-4b4c-b4f5-abe23e3a8353"
+      },
+      "disk_only_boot": true,
+      "live_installed_and_desktop_enforcing": true,
+      "live_and_installed_pam_verified": true,
+      "copr_enabled_gpg_tls_verified": true,
+      "live_and_installed_desktop_verified": true,
+      "encrypted_target": {
+        "checked_secret_free_files": [
+          "etc/crypttab",
+          "etc/kernel/cmdline",
+          "etc/fstab",
+          "etc/fedora-dde-installer/install-profile.json",
+          "boot/loader/entries/fad6b318364144fe9b60a62037fa9e84-0-rescue.conf",
+          "boot/loader/entries/fad6b318364144fe9b60a62037fa9e84-7.2.11-300.fc45.x86_64.conf"
+        ],
+        "crypttab_key_file": "none",
+        "filesystem": "btrfs",
+        "filesystem_uuid": "2560594e-3924-494d-8989-8b91aa04df5f",
+        "kdf": "argon2id",
+        "keyslots": 1,
+        "luks_uuid": "172efee3-beed-4c88-abc8-c8e827058778",
+        "phase": "target",
+        "type": "luks2",
+        "wrong_and_correct_passphrase_checked": true
+      },
+      "encrypted_disk_boot": {
+        "boot_confirmed_by_following_login": true,
+        "initramfs_password_prompt_observed": true,
+        "luks_uuid": "172efee3-beed-4c88-abc8-c8e827058778",
+        "passphrase_supplied_via": "interactive serial console"
+      },
+      "installed_screenshot": {
+        "artifact_path": "test/installed/screenshots/014-installed-system-final-state.png",
+        "sha256": "031d35ea27fd4b6371f301c07b9b76c6a924b95e6249b494c9964aeebc62270d",
+        "icon_region_rgb_sha256": "273e41171340a396553be020fb77806386e7d78e880438755236e1169576ae0e"
+      },
+      "preserved_home": null,
+      "preserved_esp": null
+    },
+    {
+      "scenario": "uefi-btrfs",
+      "status": "passed",
+      "run_id": 46002723335,
+      "job_id": 140533252714,
+      "job_url": "https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/46002723335/job/140533252714",
+      "test_commit": "ec9903e1addf5e487f468680c6af4e34ce6bf873",
+      "artifact": {
+        "id": 15201859778,
+        "name": "ISO-installation-evidence-uefi-btrfs-46002723335-1",
+        "url": "https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/46002723335/artifacts/15201859778",
+        "size_in_bytes": 9376943,
+        "sha256": "0bb0bf7e5715b8a0ee454501d8b33482c2d45ec1e9db0a51f7b24a3af86ad5af"
+      },
+      "report_sha256": "eda480dcb2c5e4d75b88e585f43acd7fa7d74ef503407193e31dd177a2b220dd",
+      "elapsed_seconds": 459.46,
+      "firmware": {
+        "code": "/usr/share/OVMF/OVMF_CODE_4M.fd",
+        "mode": "uefi",
+        "sha256": "ad23261d43116abc3747d59a7837fbf578c9586a8993f4eeba064cd07eccb083",
+        "vars_template": "/usr/share/OVMF/OVMF_VARS_4M.fd"
+      },
+      "disk_bytes": 68719476736,
+      "root": {
+        "fsroot": "/root",
+        "fstype": "btrfs",
+        "options": "rw,relatime,seclabel,compress=zstd:1,discard=async,space_cache=v2,subvolid=256,subvol=/root",
+        "source": "/dev/vda3[/root]",
+        "target": "/",
+        "uuid": "c4afe854-882a-4399-baf4-c8e1034748fb"
+      },
+      "home": {
+        "fsroot": "/home",
+        "fstype": "btrfs",
+        "options": "rw,relatime,seclabel,compress=zstd:1,discard=async,space_cache=v2,subvolid=257,subvol=/home",
+        "source": "/dev/vda3[/home]",
+        "target": "/home",
+        "uuid": "c4afe854-882a-4399-baf4-c8e1034748fb"
+      },
+      "active_swap": null,
+      "zram_observed_in_installed_diagnostics": true,
+      "mount_namespace": {
+        "after": {
+          "device": 5,
+          "inode": 4026532662
+        },
+        "authentication": "existing ordinary account and sudo shell",
+        "before": {
+          "device": 5,
+          "inode": 4026531832
+        },
+        "executor": "/usr/share/fedora-dde-installer/tools/scripts/fedora_namespace.py",
+        "uid": 0
+      },
+      "finalized": {
+        "phase": "finalized",
+        "owned_mounts": [],
+        "owned_mappers": [],
+        "secrets_cleared": true
+      },
+      "boot_ids": {
+        "live": "c635ea51-58dd-4b8f-82ae-783dd7ef99b9",
+        "installed": "0757840e-878f-42f4-8d26-ff21931c645f"
+      },
+      "disk_only_boot": true,
+      "live_installed_and_desktop_enforcing": true,
+      "live_and_installed_pam_verified": true,
+      "copr_enabled_gpg_tls_verified": true,
+      "live_and_installed_desktop_verified": true,
+      "encrypted_target": null,
+      "encrypted_disk_boot": null,
+      "installed_screenshot": {
+        "artifact_path": "test/installed/screenshots/013-installed-system-final-state.png",
+        "sha256": "ff71d06a72fbc82b0106fa04a13088d2f5a6001ae93990fe4cfedee1edf985ee",
+        "icon_region_rgb_sha256": "273e41171340a396553be020fb77806386e7d78e880438755236e1169576ae0e"
+      },
+      "preserved_home": null,
+      "preserved_esp": null
+    },
+    {
+      "scenario": "bios-ext4",
+      "status": "passed",
+      "run_id": 46002723335,
+      "job_id": 140533252785,
+      "job_url": "https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/46002723335/job/140533252785",
+      "test_commit": "ec9903e1addf5e487f468680c6af4e34ce6bf873",
+      "artifact": {
+        "id": 15202114026,
+        "name": "ISO-installation-evidence-bios-ext4-46002723335-1",
+        "url": "https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/46002723335/artifacts/15202114026",
+        "size_in_bytes": 9290850,
+        "sha256": "539681dbca22836b912f9f31bab86696c88cd452554a8b27c0858529bca44d07"
+      },
+      "report_sha256": "42a857d2ec460b02ddaf8ecf41c0e54c821031d34d4521cbfd0569ad5c27e49d",
+      "elapsed_seconds": 436.96,
+      "firmware": {
+        "implementation": "QEMU packaged SeaBIOS",
+        "mode": "bios"
+      },
+      "disk_bytes": 68719476736,
+      "root": {
+        "fsroot": "/",
+        "fstype": "ext4",
+        "options": "rw,relatime,seclabel",
+        "source": "/dev/vda3",
+        "target": "/",
+        "uuid": "d3a650c3-ce6d-46d1-8fe6-4144f648c842"
+      },
+      "home": {
+        "fsroot": "/",
+        "fstype": "ext4",
+        "options": "rw,relatime,seclabel",
+        "source": "/dev/vda3",
+        "target": "/",
+        "uuid": "d3a650c3-ce6d-46d1-8fe6-4144f648c842"
+      },
+      "active_swap": null,
+      "zram_observed_in_installed_diagnostics": true,
+      "mount_namespace": {
+        "after": {
+          "device": 5,
+          "inode": 4026532662
+        },
+        "authentication": "existing ordinary account and sudo shell",
+        "before": {
+          "device": 5,
+          "inode": 4026531832
+        },
+        "executor": "/usr/share/fedora-dde-installer/tools/scripts/fedora_namespace.py",
+        "uid": 0
+      },
+      "finalized": {
+        "phase": "finalized",
+        "owned_mounts": [],
+        "owned_mappers": [],
+        "secrets_cleared": true
+      },
+      "boot_ids": {
+        "live": "9e7da947-dbbd-4fd7-8a71-28e49201beb8",
+        "installed": "b66121e0-a208-4f02-ac8d-a6a49ea2f1e9"
+      },
+      "disk_only_boot": true,
+      "live_installed_and_desktop_enforcing": true,
+      "live_and_installed_pam_verified": true,
+      "copr_enabled_gpg_tls_verified": true,
+      "live_and_installed_desktop_verified": true,
+      "encrypted_target": null,
+      "encrypted_disk_boot": null,
+      "installed_screenshot": {
+        "artifact_path": "test/installed/screenshots/013-installed-system-final-state.png",
+        "sha256": "cfd94a774a7cbd3c5549587b8c72d5b2e701a5feac75bc840d9d0f89a3cf5eb2",
+        "icon_region_rgb_sha256": "27c0785f54cc1bd09b790a01ebf8fe14f19014db7f5ae64d39ec80db8418fa3d"
+      },
+      "preserved_home": null,
+      "preserved_esp": null
+    },
+    {
+      "scenario": "bios-mbr-ext4",
+      "status": "passed",
+      "run_id": 46002723335,
+      "job_id": 140533252829,
+      "job_url": "https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/46002723335/job/140533252829",
+      "test_commit": "ec9903e1addf5e487f468680c6af4e34ce6bf873",
+      "artifact": {
+        "id": 15201894125,
+        "name": "ISO-installation-evidence-bios-mbr-ext4-46002723335-1",
+        "url": "https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/46002723335/artifacts/15201894125",
+        "size_in_bytes": 9319439,
+        "sha256": "9626dbb1f452ec6f8d42c064e3523f9c5315ffd2d2880fc7d7a2092bf56d9601"
+      },
+      "report_sha256": "a4a7fc331ffad623e3d586dfd9e779eeb38e0db87fee3d8b843862a6a18111c0",
+      "elapsed_seconds": 432.03,
+      "firmware": {
+        "implementation": "QEMU packaged SeaBIOS",
+        "mode": "bios"
+      },
+      "disk_bytes": 68719476736,
+      "root": {
+        "fsroot": "/",
+        "fstype": "ext4",
+        "options": "rw,relatime,seclabel",
+        "source": "/dev/vda2",
+        "target": "/",
+        "uuid": "c539f74e-227d-47c2-8bb5-3858b758da7a"
+      },
+      "home": {
+        "fsroot": "/",
+        "fstype": "ext4",
+        "options": "rw,relatime,seclabel",
+        "source": "/dev/vda2",
+        "target": "/",
+        "uuid": "c539f74e-227d-47c2-8bb5-3858b758da7a"
+      },
+      "active_swap": null,
+      "zram_observed_in_installed_diagnostics": true,
+      "mount_namespace": {
+        "after": {
+          "device": 5,
+          "inode": 4026532662
+        },
+        "authentication": "existing ordinary account and sudo shell",
+        "before": {
+          "device": 5,
+          "inode": 4026531832
+        },
+        "executor": "/usr/share/fedora-dde-installer/tools/scripts/fedora_namespace.py",
+        "uid": 0
+      },
+      "finalized": {
+        "phase": "finalized",
+        "owned_mounts": [],
+        "owned_mappers": [],
+        "secrets_cleared": true
+      },
+      "boot_ids": {
+        "live": "fca97546-cdda-406a-904f-e3d75d51aec6",
+        "installed": "60f65766-d0ec-4bdc-a546-72d33b500bda"
+      },
+      "disk_only_boot": true,
+      "live_installed_and_desktop_enforcing": true,
+      "live_and_installed_pam_verified": true,
+      "copr_enabled_gpg_tls_verified": true,
+      "live_and_installed_desktop_verified": true,
+      "encrypted_target": null,
+      "encrypted_disk_boot": null,
+      "installed_screenshot": {
+        "artifact_path": "test/installed/screenshots/013-installed-system-final-state.png",
+        "sha256": "8ee5f64cd1abb8a7644c72600ddca69d323b4799f868d912c7dee471b5efc9d2",
+        "icon_region_rgb_sha256": "273e41171340a396553be020fb77806386e7d78e880438755236e1169576ae0e"
+      },
+      "preserved_home": null,
+      "preserved_esp": null
+    },
+    {
+      "scenario": "uefi-xfs-home-swap",
+      "status": "passed",
+      "run_id": 46008724244,
+      "job_id": 140538520123,
+      "job_url": "https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/46008724244/job/140538520123",
+      "test_commit": "7c80ee0f6176fdb708bd1296afba157988f12670",
+      "artifact": {
+        "id": 15203276917,
+        "name": "ISO-installation-evidence-uefi-xfs-home-swap-46008724244-1",
+        "url": "https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/46008724244/artifacts/15203276917",
+        "size_in_bytes": 9921189,
+        "sha256": "9553ba4abbf022851537c7b5d075b4dc2dc450e0a4f3ce2d92aa01f015362066"
+      },
+      "report_sha256": "464f9eb75d7566988692cd4d4571fa605bad66813ee4d89586bb472a9039a1a5",
+      "elapsed_seconds": 518.48,
+      "firmware": {
+        "code": "/usr/share/OVMF/OVMF_CODE_4M.fd",
+        "mode": "uefi",
+        "sha256": "ad23261d43116abc3747d59a7837fbf578c9586a8993f4eeba064cd07eccb083",
+        "vars_template": "/usr/share/OVMF/OVMF_VARS_4M.fd"
+      },
+      "disk_bytes": 68719476736,
+      "root": {
+        "fsroot": "/",
+        "fstype": "xfs",
+        "options": "rw,relatime,seclabel,inode64,logbufs=8,logbsize=32k,noquota",
+        "source": "/dev/vda3",
+        "target": "/",
+        "uuid": "c3e8a30a-282f-4bf0-afdd-36d5b5502b07"
+      },
+      "home": {
+        "fsroot": "/",
+        "fstype": "ext4",
+        "options": "rw,relatime,seclabel",
+        "source": "/dev/vda4",
+        "target": "/home",
+        "uuid": "9ac307c0-7933-411f-b754-11b9e6778043"
+      },
+      "active_swap": [
+        "/dev/zram0",
+        "/dev/vda5"
+      ],
+      "zram_observed_in_installed_diagnostics": true,
+      "mount_namespace": {
+        "after": {
+          "device": 5,
+          "inode": 4026532662
+        },
+        "authentication": "existing ordinary account and sudo shell",
+        "before": {
+          "device": 5,
+          "inode": 4026531832
+        },
+        "executor": "/usr/share/fedora-dde-installer/tools/scripts/fedora_namespace.py",
+        "uid": 0
+      },
+      "finalized": {
+        "phase": "finalized",
+        "owned_mounts": [],
+        "owned_mappers": [],
+        "secrets_cleared": true
+      },
+      "boot_ids": {
+        "live": "9b24b41c-dc59-4010-98bb-8a47826fe95c",
+        "installed": "634b697c-dc5d-4ac7-8a36-49bea4a4d512"
+      },
+      "disk_only_boot": true,
+      "live_installed_and_desktop_enforcing": true,
+      "live_and_installed_pam_verified": true,
+      "copr_enabled_gpg_tls_verified": true,
+      "live_and_installed_desktop_verified": true,
+      "encrypted_target": null,
+      "encrypted_disk_boot": null,
+      "installed_screenshot": {
+        "artifact_path": "test/installed/screenshots/013-installed-system-final-state.png",
+        "sha256": "25a70907678b7884ce026d28546932df6a43662e1b457e4f97929ac2b137bd88",
+        "icon_region_rgb_sha256": "273e41171340a396553be020fb77806386e7d78e880438755236e1169576ae0e"
+      },
+      "preserved_home": null,
+      "preserved_esp": null
+    },
+    {
+      "scenario": "uefi-preserve",
+      "status": "passed",
+      "run_id": 46002723335,
+      "job_id": 140533252933,
+      "job_url": "https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/46002723335/job/140533252933",
+      "test_commit": "ec9903e1addf5e487f468680c6af4e34ce6bf873",
+      "artifact": {
+        "id": 15202835775,
+        "name": "ISO-installation-evidence-uefi-preserve-46002723335-1",
+        "url": "https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/46002723335/artifacts/15202835775",
+        "size_in_bytes": 9606696,
+        "sha256": "0e7462b3b311425ba6b0f3e32ebd1d622c0bbd60a11945b59f0cf8dac4a7fc4c"
+      },
+      "report_sha256": "3ded155b592f10fdb76fbead258c6bcea234bf0f53a3f5bcfe3a24218a1a88e0",
+      "elapsed_seconds": 419.09,
+      "firmware": {
+        "code": "/usr/share/OVMF/OVMF_CODE_4M.fd",
+        "mode": "uefi",
+        "sha256": "ad23261d43116abc3747d59a7837fbf578c9586a8993f4eeba064cd07eccb083",
+        "vars_template": "/usr/share/OVMF/OVMF_VARS_4M.fd"
+      },
+      "disk_bytes": 68719476736,
+      "root": {
+        "fsroot": "/root",
+        "fstype": "btrfs",
+        "options": "rw,relatime,seclabel,compress=zstd:1,discard=async,space_cache=v2,subvolid=256,subvol=/root",
+        "source": "/dev/vda4[/root]",
+        "target": "/",
+        "uuid": "d3d833ed-4cf4-47e3-ad40-eac2d322ce8e"
+      },
+      "home": {
+        "fsroot": "/",
+        "fstype": "ext4",
+        "options": "rw,relatime,seclabel",
+        "source": "/dev/vda2",
+        "target": "/home",
+        "uuid": "b6899d54-e1e2-405b-a8b1-c5f742269a1c"
+      },
+      "active_swap": null,
+      "zram_observed_in_installed_diagnostics": true,
+      "mount_namespace": {
+        "after": {
+          "device": 5,
+          "inode": 4026532662
+        },
+        "authentication": "existing ordinary account and sudo shell",
+        "before": {
+          "device": 5,
+          "inode": 4026531832
+        },
+        "executor": "/usr/share/fedora-dde-installer/tools/scripts/fedora_namespace.py",
+        "uid": 0
+      },
+      "finalized": {
+        "phase": "finalized",
+        "owned_mounts": [],
+        "owned_mappers": [],
+        "secrets_cleared": true
+      },
+      "boot_ids": {
+        "live": "db1c611c-6e49-4296-902b-70353f0f291f",
+        "installed": "eefdb22f-ce2d-457c-95e4-14ef7ee10b70"
+      },
+      "disk_only_boot": true,
+      "live_installed_and_desktop_enforcing": true,
+      "live_and_installed_pam_verified": true,
+      "copr_enabled_gpg_tls_verified": true,
+      "live_and_installed_desktop_verified": true,
+      "encrypted_target": null,
+      "encrypted_disk_boot": null,
+      "installed_screenshot": {
+        "artifact_path": "test/installed/screenshots/012-installed-system-final-state.png",
+        "sha256": "eb58308d1643353df6cf2043b5a7de7b241dff226f6eeaa058d1062f8eb15358",
+        "icon_region_rgb_sha256": "273e41171340a396553be020fb77806386e7d78e880438755236e1169576ae0e"
+      },
+      "preserved_home": {
+        "end": 134215679,
+        "marker_sha256": "d44baf4192cf3b7226d7082f8085083dc16cb692d63163b3b533b40758028dfb",
+        "partuuid": "51021bb2-d290-4b0a-b200-51e042785f83",
+        "path": "/dev/vda2",
+        "start": 117440512,
+        "uuid": "b6899d54-e1e2-405b-a8b1-c5f742269a1c",
+        "verified": true
+      },
+      "preserved_esp": {
+        "end": 1230847,
+        "marker_sha256": "0e3dd71e044b6e98fdf21a1ce91f6e3c55999ea62d34ff5347780845d636818d",
+        "partuuid": "3f868c55-1fd0-415b-aaf8-de4806ee07c9",
+        "path": "/dev/vda1",
+        "start": 2048,
+        "uuid": "68F7-EEC4",
+        "verified": true
+      }
+    },
+    {
+      "scenario": "uefi-small",
+      "status": "passed",
+      "run_id": 46002723335,
+      "job_id": 140533252796,
+      "job_url": "https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/46002723335/job/140533252796",
+      "test_commit": "ec9903e1addf5e487f468680c6af4e34ce6bf873",
+      "artifact": {
+        "id": 15202885570,
+        "name": "ISO-installation-evidence-uefi-small-46002723335-1",
+        "url": "https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/46002723335/artifacts/15202885570",
+        "size_in_bytes": 9630331,
+        "sha256": "5df44cc48e9591fa5a33fc09bca81420a239574a9002ea0381c3593155e07e03"
+      },
+      "report_sha256": "389ddb5322bdddcead803b9d2d1c52d40412d81a3e5d1fd5f70231d5ce3a94ca",
+      "elapsed_seconds": 455.96,
+      "firmware": {
+        "code": "/usr/share/OVMF/OVMF_CODE_4M.fd",
+        "mode": "uefi",
+        "sha256": "ad23261d43116abc3747d59a7837fbf578c9586a8993f4eeba064cd07eccb083",
+        "vars_template": "/usr/share/OVMF/OVMF_VARS_4M.fd"
+      },
+      "disk_bytes": 16000000000,
+      "root": {
+        "fsroot": "/root",
+        "fstype": "btrfs",
+        "options": "rw,relatime,seclabel,compress=zstd:1,discard=async,space_cache=v2,subvolid=256,subvol=/root",
+        "source": "/dev/vda3[/root]",
+        "target": "/",
+        "uuid": "fbdca943-92ce-4ebd-982e-308444bb0d7f"
+      },
+      "home": {
+        "fsroot": "/home",
+        "fstype": "btrfs",
+        "options": "rw,relatime,seclabel,compress=zstd:1,discard=async,space_cache=v2,subvolid=257,subvol=/home",
+        "source": "/dev/vda3[/home]",
+        "target": "/home",
+        "uuid": "fbdca943-92ce-4ebd-982e-308444bb0d7f"
+      },
+      "active_swap": null,
+      "zram_observed_in_installed_diagnostics": true,
+      "mount_namespace": {
+        "after": {
+          "device": 5,
+          "inode": 4026532662
+        },
+        "authentication": "existing ordinary account and sudo shell",
+        "before": {
+          "device": 5,
+          "inode": 4026531832
+        },
+        "executor": "/usr/share/fedora-dde-installer/tools/scripts/fedora_namespace.py",
+        "uid": 0
+      },
+      "finalized": {
+        "phase": "finalized",
+        "owned_mounts": [],
+        "owned_mappers": [],
+        "secrets_cleared": true
+      },
+      "boot_ids": {
+        "live": "cd378b1e-2557-4bd0-a1ec-331e79cde31b",
+        "installed": "3150d26e-b2a9-4912-b525-7a6f17cd8c84"
+      },
+      "disk_only_boot": true,
+      "live_installed_and_desktop_enforcing": true,
+      "live_and_installed_pam_verified": true,
+      "copr_enabled_gpg_tls_verified": true,
+      "live_and_installed_desktop_verified": true,
+      "encrypted_target": null,
+      "encrypted_disk_boot": null,
+      "installed_screenshot": {
+        "artifact_path": "test/installed/screenshots/012-installed-system-final-state.png",
+        "sha256": "e21419e65d2accbb26a4724260d187e4022db3e0c12433ff05d2f6a4447ce76d",
+        "icon_region_rgb_sha256": "273e41171340a396553be020fb77806386e7d78e880438755236e1169576ae0e"
+      },
+      "preserved_home": null,
+      "preserved_esp": null
+    },
+    {
+      "scenario": "bios-luks-ext4",
+      "status": "passed",
+      "run_id": 46002723335,
+      "job_id": 140533252750,
+      "job_url": "https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/46002723335/job/140533252750",
+      "test_commit": "ec9903e1addf5e487f468680c6af4e34ce6bf873",
+      "artifact": {
+        "id": 15202860587,
+        "name": "ISO-installation-evidence-bios-luks-ext4-46002723335-1",
+        "url": "https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/46002723335/artifacts/15202860587",
+        "size_in_bytes": 9624075,
+        "sha256": "6e55b0e52e9140c64307dcbd2f45f22118bd09e855f895eccfeba95053a6a6a4"
+      },
+      "report_sha256": "2dd17ac927bce90a9d61191a9d1b39081686009f8640e78d135c21cb39719f16",
+      "elapsed_seconds": 563.62,
+      "firmware": {
+        "implementation": "QEMU packaged SeaBIOS",
+        "mode": "bios"
+      },
+      "disk_bytes": 68719476736,
+      "root": {
+        "fsroot": "/",
+        "fstype": "ext4",
+        "options": "rw,relatime,seclabel",
+        "source": "/dev/mapper/luks-9c8c277a-aa78-4394-96ed-d0f76f849083",
+        "target": "/",
+        "uuid": "c39ae61c-290d-4412-8fb1-b026d1b462f8"
+      },
+      "home": {
+        "fsroot": "/",
+        "fstype": "ext4",
+        "options": "rw,relatime,seclabel",
+        "source": "/dev/mapper/luks-9c8c277a-aa78-4394-96ed-d0f76f849083",
+        "target": "/",
+        "uuid": "c39ae61c-290d-4412-8fb1-b026d1b462f8"
+      },
+      "active_swap": null,
+      "zram_observed_in_installed_diagnostics": true,
+      "mount_namespace": {
+        "after": {
+          "device": 5,
+          "inode": 4026532662
+        },
+        "authentication": "existing ordinary account and sudo shell",
+        "before": {
+          "device": 5,
+          "inode": 4026531832
+        },
+        "executor": "/usr/share/fedora-dde-installer/tools/scripts/fedora_namespace.py",
+        "uid": 0
+      },
+      "finalized": {
+        "phase": "finalized",
+        "owned_mounts": [],
+        "owned_mappers": [],
+        "secrets_cleared": true
+      },
+      "boot_ids": {
+        "live": "570e4dcb-dd2f-440a-ad49-6a6041b64c84",
+        "installed": "118c640c-f1b4-4f28-bcea-61957f73f70e"
+      },
+      "disk_only_boot": true,
+      "live_installed_and_desktop_enforcing": true,
+      "live_and_installed_pam_verified": true,
+      "copr_enabled_gpg_tls_verified": true,
+      "live_and_installed_desktop_verified": true,
+      "encrypted_target": {
+        "checked_secret_free_files": [
+          "etc/crypttab",
+          "etc/kernel/cmdline",
+          "etc/fstab",
+          "etc/fedora-dde-installer/install-profile.json",
+          "boot/loader/entries/c6a518472ac5409296cc2a8ce4ea20fe-0-rescue.conf",
+          "boot/loader/entries/c6a518472ac5409296cc2a8ce4ea20fe-7.2.11-300.fc45.x86_64.conf"
+        ],
+        "crypttab_key_file": "none",
+        "filesystem": "ext4",
+        "filesystem_uuid": "c39ae61c-290d-4412-8fb1-b026d1b462f8",
+        "kdf": "argon2id",
+        "keyslots": 1,
+        "luks_uuid": "9c8c277a-aa78-4394-96ed-d0f76f849083",
+        "phase": "target",
+        "type": "luks2",
+        "wrong_and_correct_passphrase_checked": true
+      },
+      "encrypted_disk_boot": {
+        "boot_confirmed_by_following_login": true,
+        "initramfs_password_prompt_observed": true,
+        "luks_uuid": "9c8c277a-aa78-4394-96ed-d0f76f849083",
+        "passphrase_supplied_via": "interactive serial console"
+      },
+      "installed_screenshot": {
+        "artifact_path": "test/installed/screenshots/013-installed-system-final-state.png",
+        "sha256": "7db54789737669e658111a48106d773f63705fa3e82ee640cb3a56d92ce6cd3b",
+        "icon_region_rgb_sha256": "273e41171340a396553be020fb77806386e7d78e880438755236e1169576ae0e"
+      },
+      "preserved_home": null,
+      "preserved_esp": null
+    },
+    {
+      "scenario": "uefi-luks-xfs",
+      "status": "passed",
+      "run_id": 46002723335,
+      "job_id": 140533252835,
+      "job_url": "https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/46002723335/job/140533252835",
+      "test_commit": "ec9903e1addf5e487f468680c6af4e34ce6bf873",
+      "artifact": {
+        "id": 15203771377,
+        "name": "ISO-installation-evidence-uefi-luks-xfs-46002723335-1",
+        "url": "https://github.com/Fedora-DDE-Remix/ISO-Build/actions/runs/46002723335/artifacts/15203771377",
+        "size_in_bytes": 9899924,
+        "sha256": "2709fa07f349fede777cb9defaf5e27938639f5f0e1079b371ca2560a95980bc"
+      },
+      "report_sha256": "b24aa77bed8a7b98c3d157b0f54a5280141b8fd522436138708e234d3d03ca73",
+      "elapsed_seconds": 474.25,
+      "firmware": {
+        "code": "/usr/share/OVMF/OVMF_CODE_4M.fd",
+        "mode": "uefi",
+        "sha256": "ad23261d43116abc3747d59a7837fbf578c9586a8993f4eeba064cd07eccb083",
+        "vars_template": "/usr/share/OVMF/OVMF_VARS_4M.fd"
+      },
+      "disk_bytes": 68719476736,
+      "root": {
+        "fsroot": "/",
+        "fstype": "xfs",
+        "options": "rw,relatime,seclabel,inode64,logbufs=8,logbsize=32k,noquota",
+        "source": "/dev/mapper/luks-814c1b9f-aae2-49cf-b361-df9f1ada8a12",
+        "target": "/",
+        "uuid": "0499308b-d1e3-4fcf-9bb4-8cdc6b017dd4"
+      },
+      "home": {
+        "fsroot": "/",
+        "fstype": "xfs",
+        "options": "rw,relatime,seclabel,inode64,logbufs=8,logbsize=32k,noquota",
+        "source": "/dev/mapper/luks-814c1b9f-aae2-49cf-b361-df9f1ada8a12",
+        "target": "/",
+        "uuid": "0499308b-d1e3-4fcf-9bb4-8cdc6b017dd4"
+      },
+      "active_swap": null,
+      "zram_observed_in_installed_diagnostics": true,
+      "mount_namespace": {
+        "after": {
+          "device": 5,
+          "inode": 4026532662
+        },
+        "authentication": "existing ordinary account and sudo shell",
+        "before": {
+          "device": 5,
+          "inode": 4026531832
+        },
+        "executor": "/usr/share/fedora-dde-installer/tools/scripts/fedora_namespace.py",
+        "uid": 0
+      },
+      "finalized": {
+        "phase": "finalized",
+        "owned_mounts": [],
+        "owned_mappers": [],
+        "secrets_cleared": true
+      },
+      "boot_ids": {
+        "live": "4837f287-4a05-4a2e-a580-e2ae042b479f",
+        "installed": "02855cb9-6db4-4f7a-b986-61e22092d660"
+      },
+      "disk_only_boot": true,
+      "live_installed_and_desktop_enforcing": true,
+      "live_and_installed_pam_verified": true,
+      "copr_enabled_gpg_tls_verified": true,
+      "live_and_installed_desktop_verified": true,
+      "encrypted_target": {
+        "checked_secret_free_files": [
+          "etc/crypttab",
+          "etc/kernel/cmdline",
+          "etc/fstab",
+          "etc/fedora-dde-installer/install-profile.json",
+          "boot/loader/entries/b63dbcf5344c477d9f4a9a7305fbd7bd-0-rescue.conf",
+          "boot/loader/entries/b63dbcf5344c477d9f4a9a7305fbd7bd-7.2.11-300.fc45.x86_64.conf"
+        ],
+        "crypttab_key_file": "none",
+        "filesystem": "xfs",
+        "filesystem_uuid": "0499308b-d1e3-4fcf-9bb4-8cdc6b017dd4",
+        "kdf": "argon2id",
+        "keyslots": 1,
+        "luks_uuid": "814c1b9f-aae2-49cf-b361-df9f1ada8a12",
+        "phase": "target",
+        "type": "luks2",
+        "wrong_and_correct_passphrase_checked": true
+      },
+      "encrypted_disk_boot": {
+        "boot_confirmed_by_following_login": true,
+        "initramfs_password_prompt_observed": true,
+        "luks_uuid": "814c1b9f-aae2-49cf-b361-df9f1ada8a12",
+        "passphrase_supplied_via": "interactive serial console"
+      },
+      "installed_screenshot": {
+        "artifact_path": "test/installed/screenshots/015-installed-system-final-state.png",
+        "sha256": "bb7ac032adecc58860e3623d1f7717274681a799762537f40216a14febd7e332",
+        "icon_region_rgb_sha256": "273e41171340a396553be020fb77806386e7d78e880438755236e1169576ae0e"
+      },
+      "preserved_home": null,
+      "preserved_esp": null
+    }
+  ]
+}

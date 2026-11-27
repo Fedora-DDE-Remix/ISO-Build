@@ -5,11 +5,12 @@ umask 022
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C.UTF-8
 unset ANACONDA_ROOT_PATH
+die() { printf 'compose: %s\n' "$*" >&2; exit 1; }
 source /workspace/config/build.env
-[[ $CONFIG_VERSION =~ ^45\.[0-9]{8}$ ]]
+[[ $CONFIG_VERSION =~ ^45\.[0-9]{8}(\.[1-9][0-9]*)?$ ]] ||
+    die 'CONFIG_VERSION must be 45.YYYYMMDD or 45.YYYYMMDD.N with a positive revision.'
 iso_name=Fedora-DDE-Remix-$CONFIG_VERSION-x86_64.iso
 
-die() { printf 'compose: %s\n' "$*" >&2; exit 1; }
 [[ $EUID -eq 0 && $# -eq 0 ]] || die 'Run as root without arguments.'
 source /etc/os-release
 [[ $ID == fedora && $VERSION_ID == 45 && $(uname -m) == x86_64 ]] ||

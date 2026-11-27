@@ -1,0 +1,5 @@
+[com.deepin.dde.appearance]
+background-uris=['file:///usr/share/backgrounds/images/earth_from_space.jpg']
+
+[com.deepin.wrap.gnome.desktop.background]
+picture-uri='file:///usr/share/backgrounds/images/earth_from_space.jpg'

@@ -1,0 +1,63 @@
+name: Validate the complete pinned DFM RPM build
+
+on:
+  push:
+    branches:
+      - 'validate-dfm-hotfix-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: dfm-validation-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Fedora 45 immutable RPM validation and nested Qt probe
+    runs-on: ubuntu-24.04
+    container: registry.fedoraproject.org/fedora:45
+    timeout-minutes: 30
+    steps:
+      - name: Install validation tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          dnf -y install git gh python3 rpm-build redhat-rpm-config dnf5-plugins \
+            cmake gcc-c++ ninja-build binutils pkgconf-pkg-config \
+            2>&1 | tee "$RUNNER_TEMP/dfm-validation-tooling.log"
+
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install and validate the exact preserved RPM set
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/validate-dfm-hotfix.sh artifacts/dfm-validation
+
+      - name: Preserve bootstrap log and refresh checksums
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/dfm-validation/validation/logs
+          if test -f "$RUNNER_TEMP/dfm-validation-tooling.log"; then
+            cp "$RUNNER_TEMP/dfm-validation-tooling.log" artifacts/dfm-validation/validation/logs/tooling.log
+          fi
+          if test -f scripts/validate-dfm-hotfix.py; then
+            python3 scripts/validate-dfm-hotfix.py checksums artifacts/dfm-validation
+          fi
+
+      - name: Upload unchanged RPMs and independent validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: DFM-validated-Fedora45-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/dfm-validation/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30

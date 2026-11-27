@@ -1,0 +1,9 @@
+[copr:copr.fedorainfracloud.org:mozixun:Fedora-DDE-Remix]
+name=Copr repo for Fedora DDE Remix owned by mozixun
+baseurl=https://download.copr.fedorainfracloud.org/results/mozixun/Fedora-DDE-Remix/fedora-$releasever-$basearch/
+type=rpm-md
+enabled=1
+gpgcheck=1
+sslverify=1
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-dde-remix
+skip_if_unavailable=1

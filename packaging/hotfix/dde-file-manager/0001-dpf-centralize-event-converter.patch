@@ -1,0 +1,27 @@
+diff --git a/include/dfm-framework/event/eventhelper.h b/include/dfm-framework/event/eventhelper.h
+index 20e5a78..d499da1 100644
+--- a/include/dfm-framework/event/eventhelper.h
++++ b/include/dfm-framework/event/eventhelper.h
+@@ -82,7 +82,8 @@ inline void threadEventAlert(EventType type)
+ class EventConverter
+ {
+ public:
+-    static inline EventConverterFunc convertFunc {};
++    // All dynamically loaded plugins must use the framework's single callback.
++    static EventConverterFunc convertFunc;
+     static void registerConverter(const EventConverterFunc &func)
+     {
+         static std::once_flag flag;
+diff --git a/src/dfm-framework/event/event.cpp b/src/dfm-framework/event/event.cpp
+index 7be78da..4c296db 100644
+--- a/src/dfm-framework/event/event.cpp
++++ b/src/dfm-framework/event/event.cpp
+@@ -5,6 +5,8 @@
+ #include <dfm-framework/event/event.h>
+ 
+ DPF_BEGIN_NAMESPACE
++EventConverterFunc EventConverter::convertFunc {};
++
+ class EventPrivate
+ {
+ public:

@@ -27,6 +27,7 @@ configure_image() {
     source /etc/os-release
     [[ $ID == fedora && $VERSION_ID == 45 ]] || die 'Only Fedora 45 images are supported.'
     verify_profile
+    /usr/libexec/fedora-dde-check-copr
     python3 - <<'PY'
 import json
 from pathlib import Path
@@ -47,6 +48,10 @@ installed_comps = subprocess.check_output(
     text=True)
 assert comps.get('nevra') == installed_comps, 'Comps input differs from the installed RPM'
 assert re.fullmatch(r'[0-9a-f]{64}', comps.get('sha256', '')), 'Missing comps RPM digest'
+hotfix = data['dfm_hotfix']
+for package in hotfix['runtime_rpms']:
+    actual = subprocess.check_output(['rpm', '-q', '--qf', '%{EPOCHNUM}\t%{VERSION}\t%{RELEASE}\t%{ARCH}\t%{SOURCERPM}', package['name']], text=True).split('\t')
+    assert actual == [str(package['epoch']), package['version'], package['release'], package['arch'], package['source_rpm']], 'The installed DFM hotfix differs from its verified build: ' + package['name']
 PY
     [[ -s /etc/pam.d/ddm ]] || die 'The maintained Fedora DDM PAM stack is missing.'
     [[ -x /usr/libexec/fedora-dde-live ]] || die 'The packaged Live helper is missing.'

@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "maintainer_repository": "Fedora-DDE-Remix/Deepin-Desktop-Environment",
+  "maintainer_commit": "adcd681b0b9e68cacbf9daa33bede62a253a3315",
+  "upstream_repository": "linuxdeepin/deepin-desktop-base",
+  "upstream_tag": "2026.10.28",
+  "upstream_tag_object": "f918a51224a6767103a3044a7595ff2602ee5826",
+  "upstream_commit": "63c52c9387a350df684bb5043dd836d86f862092",
+  "version": "2026.10.28",
+  "base_release": "1.fc45",
+  "release": "1.1.remix1.fc45",
+  "files": {
+    "deepin-desktop-base.spec": "6155a5386352140fc0988b1c95e3fd035031bd6b9e532ebc8f7c3d45cd860d27",
+    "maintainer/deepin-desktop-base.spec": "a38f3f86dc9e50df22de1954f50452cb881ea7743bcfbf2b09472124e3c05782",
+    "maintainer/LICENSE": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+    "README.md": "4f2073e05e995f61f943bee7bf7a4b05af3373d7f233d3910487198da4d5a3ee"
+  }
+}

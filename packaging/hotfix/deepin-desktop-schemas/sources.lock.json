@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "maintainer_repository": "Fedora-DDE-Remix/Deepin-Desktop-Environment",
+  "maintainer_commit": "adcd681b0b9e68cacbf9daa33bede62a253a3315",
+  "upstream_repository": "linuxdeepin/deepin-desktop-schemas",
+  "upstream_tag": "6.0.13",
+  "upstream_tag_object": "ddeeb4848a07a55f0d843027466b4dcb12e732b6",
+  "upstream_commit": "00a92111f8f0cc7bcba8af9ae2a9950c7f02ae4e",
+  "version": "6.0.13",
+  "base_release": "1.fc45",
+  "release": "1.1.remix1.fc45",
+  "files": {
+    "deepin-desktop-schemas.spec": "675037fa8bebf6fb07cfda9eb30e2a964ab5f3202c2a6b0e0ef1190eb9a273d6",
+    "maintainer/deepin-desktop-schemas.spec": "e4fe0bb3e05b3518fbbc090da0dee26e9780eac0fc268a78ed47125c0e3038f7",
+    "maintainer/LICENSE": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+    "README.md": "bc69ccf5407d764fe798752772eda83725d0afacd5ce39997b0dbf15bfec9091",
+    "0001-fix-duplicate-mediakey-metadata.patch": "c0e06ede2bfef58227a2dff6cbb2292800b721ef6ac98150cb5fd9323d9ff709"
+  }
+}

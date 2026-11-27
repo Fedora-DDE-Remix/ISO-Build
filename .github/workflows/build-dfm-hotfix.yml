@@ -1,0 +1,72 @@
+name: Build temporary DFM hotfix RPMs
+
+on:
+  push:
+    branches:
+      - 'build-dfm-hotfix-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dfm-hotfix-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Fedora 45 complete DFM package and nested Qt probe
+    runs-on: ubuntu-24.04
+    container: registry.fedoraproject.org/fedora:45
+    timeout-minutes: 180
+    steps:
+      - name: Install build tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          dnf -y install git curl tar gzip patch rpm-build redhat-rpm-config \
+            dnf5-plugins python3 python3-rpm shadow-utils util-linux \
+            cmake gcc-c++ ninja-build binutils pkgconf-pkg-config \
+            2>&1 | tee "$RUNNER_TEMP/dfm-hotfix-tooling.log"
+
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build all RPMs and validate the installed fix
+        shell: bash
+        run: bash scripts/build-dfm-hotfix.sh artifacts/dfm-hotfix
+
+      - name: Preserve bootstrap evidence and checksums
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/dfm-hotfix/logs
+          if test -f "$RUNNER_TEMP/dfm-hotfix-tooling.log"; then
+            cp "$RUNNER_TEMP/dfm-hotfix-tooling.log" artifacts/dfm-hotfix/logs/tooling.log
+          fi
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+          root = Path('artifacts/dfm-hotfix')
+          paths = sorted(path for path in root.rglob('*') if path.is_file() and path.name != 'SHA256SUMS')
+          for path in paths:
+              if any(':' in part for part in path.relative_to(root).parts):
+                  raise SystemExit('Artifact filenames must not contain colons: ' + str(path))
+          with (root / 'SHA256SUMS').open('w') as output:
+              for path in paths:
+                  with path.open('rb') as source:
+                      digest = hashlib.file_digest(source, 'sha256').hexdigest()
+                  output.write(f'{digest}  {path.relative_to(root).as_posix()}\n')
+          PY
+
+      - name: Upload complete RPMs, source and validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: DFM-hotfix-Fedora45-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/dfm-hotfix/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
